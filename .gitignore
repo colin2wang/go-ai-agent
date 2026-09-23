@@ -1,0 +1,6 @@
+# IDEs
+.idea/
+
+# Output
+dist/
+internal/api/webdist/
