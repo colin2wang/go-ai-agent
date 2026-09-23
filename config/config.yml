@@ -1,0 +1,52 @@
+# ============================================================================
+# go-ai-agent 总配置（唯一入口）
+# ----------------------------------------------------------------------------
+# 运行：
+#   harness                                   # 默认读取 config/config.yml
+#   harness -config config/config.yml         # 显式指定
+#
+# 配置分层：
+#   config.yml ──┬── ai.config ─────→ ai.yml                  AI provider 端点
+#                └── features[].config ─→ features/*.yml       各子功能（工作流+步骤）
+#
+# 新增子功能：在下面 features 追加一项 + 新建对应 yml 即可，平台代码无需改动。
+# 路径解析：绝对路径 > 当前工作目录 > 本文件所在目录；下面的引用写「相对本文件」，
+# 因此从任意工作目录启动、-config 指向任意位置均可正确解析。
+# ============================================================================
+
+# ---- 应用元信息（前端标题栏 / 侧边栏展示）----
+app:
+  name: go-ai-agent
+  title: AI 工作流平台
+
+# ---- HTTP 服务 ----
+server:
+  addr: ":8000"                   # 首选监听端口；被占用时自动改用随机空闲端口（留空等价于 :8000）
+  open-browser: true              # 启动后自动打开浏览器
+  read-header-timeout-seconds: 10
+  shutdown-timeout-seconds: 5
+
+# ---- 存储：LLM 调用统计（SQLite，纯 Go 无 CGO）----
+storage:
+  enabled: true
+  db-path: ./database/go-ai-agent.db   # 目录不存在自动创建
+  retention-days: 30                   # 流水保留期，过期自动清理
+  queue-capacity: 10000                # 异步写队列容量（满则丢弃，不阻塞调用链）
+
+# ---- 日志级别：debug | info | warn | error ----
+logging:
+  level: info
+
+# ---- AI provider 配置引用（相对本文件）----
+ai:
+  config: ai.yml
+
+# ---- 子功能注册表（左侧菜单顺序 = 列表顺序；order 用于同组内排序）----
+features:
+  - id: payslip-ocr
+    enabled: true
+    config: features/payslip-ocr.yml
+
+  - id: book-toc
+    enabled: true
+    config: features/book-toc.yml

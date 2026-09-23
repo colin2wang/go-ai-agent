@@ -1,9 +1,56 @@
 definitions:
+  api.FeatureInfo:
+    properties:
+      description:
+        type: string
+      icon:
+        type: string
+      id:
+        type: string
+      input:
+        $ref: '#/definitions/api.FeatureInput'
+      name:
+        type: string
+      order:
+        type: integer
+      output:
+        $ref: '#/definitions/api.FeatureOutput'
+      pipeline:
+        items:
+          type: string
+        type: array
+      steps:
+        items:
+          type: string
+        type: array
+    type: object
+  api.FeatureInput:
+    properties:
+      accept:
+        type: string
+      hint:
+        type: string
+      kind:
+        type: string
+      multiple:
+        type: boolean
+    type: object
+  api.FeatureOutput:
+    properties:
+      extension:
+        type: string
+      template:
+        type: string
+      template_dir:
+        type: string
+    type: object
   api.JobResult:
     properties:
       duration_ms:
         type: integer
       error:
+        type: string
+      feature_id:
         type: string
       final_report:
         type: string
@@ -33,6 +80,60 @@ definitions:
 info:
   contact: {}
 paths:
+  /api/features:
+    get:
+      description: 返回已启用的子功能（前端左侧菜单与流程链展示）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/api.FeatureInfo'
+              type: array
+            type: object
+      summary: 子功能清单
+      tags:
+      - features
+  /api/features/{id}/run:
+    post:
+      consumes:
+      - multipart/form-data
+      description: multipart 上传文件并按子功能 id 执行其工作流。单文件用 file 字段；多页场景用 files 字段（可多个，按上传顺序处理）
+      parameters:
+      - description: 子功能 ID（如 payslip-ocr / book-toc）
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 单文件输入（如工资单图片）
+        in: formData
+        name: file
+        type: file
+      - description: 多页输入（如多张目录页扫描件，可多个）
+        in: formData
+        name: files
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.JobResult'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.apiError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.apiError'
+      summary: 执行子功能工作流
+      tags:
+      - features
   /api/health:
     get:
       description: 服务存活探测
@@ -50,7 +151,7 @@ paths:
       - system
   /api/jobs/{id}:
     get:
-      description: 按 jobID 查询一次审读的结果（当前实现为同步接口，此端点预留异步扩展）
+      description: 按 jobID 查询一次执行的结果（当前实现为同步接口，此端点预留异步扩展）
       parameters:
       - description: 任务 ID
         in: path
@@ -71,11 +172,30 @@ paths:
       summary: 查询任务结果
       tags:
       - jobs
+  /api/overview:
+    get:
+      description: '最近 N 天（query: days，默认 14）调用统计聚合：总量/今日/耗时/成功率/趋势/模型用量/最近调用'
+      parameters:
+      - description: 统计天数（默认 14）
+        in: query
+        name: days
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 概览指标
+      tags:
+      - overview
   /api/payslip/review:
     post:
       consumes:
       - multipart/form-data
-      description: multipart/form-data 上传工资单图片（字段名 file），同步执行 OCR→翻译→审读→专家→汇总，返回完整报告
+      description: multipart/form-data 上传工资单图片（字段名 file），执行 payslip-ocr 子功能工作流
       parameters:
       - description: 工资单图片（PNG/JPG）
         in: formData
@@ -100,4 +220,23 @@ paths:
       summary: 上传工资单并执行审读流水线
       tags:
       - payslip
+  /api/providers/check:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        对 ai.yml 声明的 provider 做一次连通性探测（GET {base-url}/v1/models）。
+        body: {"provider":"name"} 仅测指定端点，省略或为空则并发测试全部端点。
+        由前端在概览页加载时调用一次、或用户手动点击「测试 / 全部测试」时调用，不做后台实时轮询。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'results: llm.ProbeResult 数组（provider/status/http_status/latency_ms/detail/checked_at）'
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 测试 AI 端点连通性
+      tags:
+      - providers
 swagger: "2.0"

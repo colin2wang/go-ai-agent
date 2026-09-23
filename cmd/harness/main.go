@@ -1,6 +1,8 @@
-// Command harness 工资单审读流水线：
+// Command harness AI 工作流平台入口：
 //   - 默认（无参数）：以 Web 形式运行，自动选端口并打开浏览器
-//   - CLI 模式：harness <payslip.png> [config/ai.yml] → 打印最终报告
+//   - CLI 模式：harness <payslip.png> [config/config.yml] → 打印最终报告
+//
+// 配置为三层结构：config/config.yml（总配置）→ ai.yml（AI provider）→ features/*.yml（子功能）。
 package main
 
 import (

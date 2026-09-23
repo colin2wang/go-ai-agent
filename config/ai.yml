@@ -1,13 +1,16 @@
 # ============================================================================
-# AI 大模型服务配置（前缀 llm）
+# AI provider 配置（由 config.yml 的 ai.config 引用）
 # ----------------------------------------------------------------------------
-# 支持多种 AI 后端（LM Studio / Ollama / OpenAI 兼容 API）：
-#   - providers：以嵌套列表声明多个连接端点，每个 provider 可被多个审读步骤复用
-#   - steps：按审读步骤独立配置（引用 provider + 模型 + 配套提示词模板）
-# provider 作为未填字段的回退；模型无全局默认，必须由步骤 / 子项目显式指定（provider + model）。
+# 本文件只描述「连哪个 AI 端点」与全局默认值，不描述具体业务流程。
+# 业务流程（步骤 → provider + model + 提示词）属于子功能，见 config/features/*.yml。
+#
+# 支持多种后端（LM Studio / Ollama / OpenAI 兼容 API）：
+#   - providers：嵌套列表声明连接端点，可被任意子功能的任意步骤复用
+#   - 未填字段回退到本文件顶部的全局默认值
+#   - 模型无全局默认，必须由子功能步骤显式指定 model（provider 在 ai.yml 中声明）
 # ============================================================================
 llm:
-  # 全局默认回退值（provider / step 未填时回退到这里）
+  # ---- 全局默认回退值（provider / 步骤未填时回退到这里）----
   base-url: http://localhost:1234
   api-key: lm-studio
   temperature: 0.3
@@ -18,7 +21,7 @@ llm:
   max-tokens: 8192
   debug-request-log: false
 
-  # LLM 调用输入/输出日志（llm.io-log）：每次调用生成 UUID 关联输入与输出（UUID 仅用于日志，
+  # LLM 调用输入/输出日志（io-log）：每次调用生成 UUID 关联输入与输出（UUID 仅用于日志，
   # 不提交给 LLM）。输入 system/user 按前后各 head-chars/tail-chars 截断并记录总字数；
   # 输出回答全文；推理（thinking）部分前后各 head-chars/tail-chars 截断，中间省略，记录总字数。
   # 多模态输入只记录文件名与媒体类型，不记录二进制内容。
@@ -26,24 +29,23 @@ llm:
     enabled: true
     head-chars: 1000
     tail-chars: 1000
+
   # 统一以流式接收模型返回消息（推理 REASONING + 回答 ANSWER 增量块经 LlmStreamOutput 累积），
   # 默认开启；关闭时回退一次返回的普通调用。
   stream-output: true
 
   # 是否开启推理（思考模式），默认开启。
-  # 关闭时对所有请求强制 reasoning_effort=none，关闭 Qwen3 系列 / LM Studio 上的思考模式
-  # （详见 reasoning_effort.md），可显著加快响应并避免思考过程吃光 max-tokens 预算。
-  # 各业务模块（ocr / translate / proofread / expert / analyze 等）可独立覆盖此默认值。
+  # 关闭时对所有请求强制 reasoning_effort=none，关闭 Qwen3 系列 / LM Studio 上的思考模式，
+  # 可显著加快响应并避免思考过程吃光 max-tokens 预算。子功能各步骤可独立覆盖。
   reasoning-enabled: true
 
   # 默认使用的 provider 名（对应 providers[].name）；步骤未指定 provider 时回退此项。
-  # 注意：模型不再有全局默认值，每个步骤 / 子项目必须显式指定自己使用的模型（provider + model）。
   default-provider: lmstudio-local
 
   # ===== 多种 AI 后端连接端点 =====
   providers:
-    # 1) LM Studio 本地推理（OpenAI 兼容）。注意：Spring AI 会自动追加 /v1 前缀，
-    # 因此 base-url 不要带 /v1 后缀（写了也会被自动去除）。
+    # 1) LM Studio 本地推理（OpenAI 兼容）。注意：langchaingo 会自动追加 /v1 前缀，
+    #    因此 base-url 不要带 /v1 后缀（写了也会被自动去除）。
     - name: lmstudio-local
       type: lmstudio
       base-url: http://localhost:1234
@@ -63,7 +65,7 @@ llm:
 
     # 3) OpenAI 兼容云端 / 网关（硅基流动、OneAPI、vLLM、OpenAI 官方等）
     #    视觉模型（VLM，如 Qwen2.5-VL-7B-Instruct）同样复用以上端点，
-    #    无需单独声明 provider，由 ocr.yml 的 provider + model 指定即可。
+    #    无需单独声明 provider，由子功能步骤的 provider + model 指定即可。
     - name: openai-cloud
       type: openai-compatible
       base-url: https://api.openai.com
@@ -71,13 +73,3 @@ llm:
       timeout-seconds: 120
       connect-timeout-seconds: 10
       max-tokens: 4096
-
-# ============================================================================
-# LLM 调用基准统计（前缀 llm-stats，独立前缀避免与 llm.* 绑定纠缠）
-# SQLite 落库：模型清单/介绍、单次调用流水、历史平均；enabled=false 仅关闭落库（调用路径不变）。
-# ============================================================================
-llm-stats:
-  enabled: true
-  db-path: ./database/pub-audit-ai.db         # 按模块命名（pub-audit-ai 模块一个库），不存在自动创建（需求4）
-  retention-days: 30                          # 流水保留期
-  queue-capacity: 10000                       # 异步写队列

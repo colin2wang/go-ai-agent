@@ -13,6 +13,9 @@ import (
 	"go-ai-agent/internal/stats"
 )
 
+// defaultConfigPath 总配置入口（内部再展开 ai.yml 与 features/*.yml）。
+const defaultConfigPath = "config/config.yml"
+
 // runCLI 单图审读：读配置 → 建 provider → 跑流水线 → 打印最终报告。
 func runCLI() {
 	if err := cliRun(); err != nil {
@@ -23,7 +26,7 @@ func runCLI() {
 
 func cliRun() error {
 	imagePath := os.Args[1]
-	cfgPath := "config/ai.yml"
+	cfgPath := defaultConfigPath
 	if len(os.Args) > 2 {
 		cfgPath = os.Args[2]
 	} else if v := os.Getenv("AI_CONFIG"); v != "" {
@@ -33,17 +36,27 @@ func cliRun() error {
 	if err != nil {
 		return err
 	}
+	applyLogLevel(cfg.Logging.Level)
 
-	// llm-stats：enabled=false 仅关闭落库（调用路径不变）
+	// 子功能：优先工资单场景，否则取第一个已启用子功能
+	feat, ok := cfg.Feature("payslip-ocr")
+	if !ok {
+		if len(cfg.Resolved) == 0 {
+			return fmt.Errorf("配置未启用任何子功能")
+		}
+		feat = cfg.Resolved[0]
+	}
+
+	// storage：enabled=false 仅关闭落库（调用路径不变）
 	var recorder *stats.Recorder
 	var sink *llm.StatsSink
-	if cfg.LLMStats.Enabled {
-		recorder, err = stats.Open(cfg.LLMStats.DBPath, cfg.LLMStats.RetentionDays)
+	if cfg.Storage.Enabled {
+		recorder, err = stats.Open(cfg.Storage.DBPath, cfg.Storage.RetentionDays)
 		if err != nil {
-			return fmt.Errorf("init llm-stats: %w", err)
+			return fmt.Errorf("init storage: %w", err)
 		}
 		defer recorder.Close()
-		sink = llm.NewStatsSink(recorder, cfg.LLMStats.QueueCapacity)
+		sink = llm.NewStatsSink(recorder, cfg.Storage.QueueCapacity)
 		defer sink.Close()
 	}
 
@@ -54,14 +67,15 @@ func cliRun() error {
 
 	app, err := graph.Build(nodes.Deps{
 		Factory: factory,
-		Steps:   cfg.LLM.Steps,
+		Steps:   feat.Steps,
 		Default: config.Step{
 			Provider:    cfg.LLM.DefaultProvider,
 			Model:       envOr("HARNESS_DEFAULT_MODEL", "qwen3-vl-8b"),
-			Temperature: cfg.LLM.Temperature,
+			Temperature: &cfg.LLM.Temperature,
 			MaxTokens:   cfg.LLM.MaxTokens,
 		},
-		Stream: cfg.LLM.StreamOutput,
+		Stream:     cfg.LLM.StreamOutput,
+		MaxRetries: feat.Workflow.MaxRetries,
 	})
 	if err != nil {
 		return fmt.Errorf("build graph: %w", err)

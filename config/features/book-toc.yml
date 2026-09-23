@@ -1,0 +1,56 @@
+# ============================================================================
+# 子功能：扫描版图书目录 → 文字版目录
+# ----------------------------------------------------------------------------
+# 输入：图书目录页的扫描/拍照图片（支持多页，一次上传、按页 OCR）
+# 输出：按模板渲染的文字版目录（Markdown / 纯文本大纲 / 表格）
+#
+# 工作流：ocr(逐页 VLM) → merge(跨页合并校对) → render(模板渲染，本地无 LLM)
+# ============================================================================
+id: book-toc
+name: 图书目录识别
+description: 上传扫描版图书目录页（可多页），自动 OCR、跨页合并校对，并按模板生成文字版目录
+icon: book
+order: 2
+
+# ---- 输入声明（前端据此渲染上传控件）----
+input:
+  kind: image
+  multiple: true            # 多页上传
+  accept: image/png,image/jpeg,image/webp
+  hint: 支持一次选择多张目录页；建议按页码顺序选择
+
+# ---- 输出声明（模板渲染，用法类似 Java FreeMarker）----
+output:
+  template: markdown        # 模板名 → templates/book-toc/markdown.tpl
+  template-dir: ""          # 留空=使用内置模板；指定目录则用该目录下同名 .tpl 覆盖
+  extension: .md            # 下载文件的扩展名
+
+# ---- 工作流声明 ----
+workflow:
+  type: book-toc            # 编排类型（对应 internal/graph 内置图）
+  entry: ocr
+  max-retries: 0            # 目录识别无审读回退，失败即返回
+  pipeline:
+    - ocr
+    - merge
+    - render
+
+# ---- 各步骤独立配置（render 为本地模板渲染，不消耗 Token）----
+steps:
+  # 逐页 OCR：单张目录页 → 条目 JSON
+  ocr:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    prompt-template: toc-ocr-default
+    temperature: 0.1
+    max-tokens: 8192
+    reasoning-enabled: false、
+
+  # 跨页合并：去重、修正层级、按页码排序
+  merge:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    prompt-template: toc-merge-default
+    temperature: 0.1
+    max-tokens: 8192
+    reasoning-enabled: false

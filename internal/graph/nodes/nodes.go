@@ -6,55 +6,55 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/tmc/langchaingo/llms"
 
 	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/llm"
 	"go-ai-agent/internal/prompt"
+	"go-ai-agent/internal/tmpl"
 )
 
 // State 全流程共享状态（泛型 StateGraph[State] 的载体）。
 // 定义在 nodes 包以避免 graph ↔ nodes 循环引用；graph 包用类型别名引用。
 type State struct {
-	ImagePath    string         // 工资单截图路径
-	OCRText      string         // OCR 节点输出的结构化 JSON
-	Structured   map[string]any // 工资单结构化字段（proofread 解析填充）
+	ImagePath    string         // 单页输入（工资单截图路径）
+	Pages        []string       // 多页输入（扫描版图书目录页，按选择顺序）
+	Title        string         // 识别出的书名（图书目录场景）
+	OCRText      string         // OCR 节点输出的结构化 JSON（多页时为各页拼接）
+	PageOCR      []string       // 每一页的原始 OCR 输出
+	Entries      []TOCEntry     // 合并后的目录条目（图书目录场景）
+	Structured   map[string]any // 结构化字段（工资单字段 / 目录条目汇总）
 	Translation  string         // 翻译结果
-	ReviewNotes  []string       // 审读发现的问题
+	ReviewNotes  []string       // 审读发现的问题 / 降级提示
 	ExpertReport string         // 专家分析
-	FinalReport  string         // 最终汇总报告
+	FinalReport  string         // 最终输出（汇总报告 / 模板渲染后的目录）
 	Err          error          // 最近一次节点错误（供条件边重试判断）
 	RetryCount   map[string]int // 各节点已重试次数
 }
 
-// Deps 节点共享依赖。
+// Deps 节点共享依赖（由某条子功能的工作流配置构造）。
 type Deps struct {
 	Factory *llm.Factory
 	// Steps 按节点名提供 provider+model+覆盖项；未声明的节点回退 Default。
 	Steps   map[string]config.Step
 	Default config.Step // provider 已回退展开
 	Stream  bool
+	// MaxRetries 条件边回退重试上限（来自子功能 workflow.max-retries）。
+	MaxRetries int
+	// Workflow 工作流类型（来自子功能 workflow.type），供编排层选择图。
+	Workflow string
+	// Template 模板引擎（本地渲染步骤使用，可为 nil）。
+	Template *tmpl.Engine
+	// Output 输出声明（模板名 / 外部模板目录 / 扩展名）。
+	Output config.Output
 }
 
-// stepCfg 返回节点对应的步骤配置（未单独声明则回退默认）。
+// stepCfg 返回节点对应的步骤配置（未单独声明则回退 Default）。
 func (d Deps) stepCfg(name string) config.Step {
-	if st, ok := d.Steps[name]; ok {
-		if st.Provider == "" {
-			st.Provider = d.Default.Provider
-		}
-		if st.Model == "" {
-			st.Model = d.Default.Model
-		}
-		if st.MaxTokens == 0 {
-			st.MaxTokens = d.Default.MaxTokens
-		}
-		if st.Temperature == 0 {
-			st.Temperature = d.Default.Temperature
-		}
-		return st
-	}
-	return d.Default
+	return d.Steps[name].WithDefaults(d.Default)
 }
 
 // call 封装一次 LLM 调用：取客户端 → 组装选项 → GenerateContent，返回回答文本。
@@ -94,13 +94,15 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 		messages := []llms.MessageContent{
 			llms.TextParts(llms.ChatMessageTypeSystem, prompt.OCRSystem),
 			{
+				// 多模态消息必须显式声明 role，否则 langchaingo 报 "role not supported"
+				Role: llms.ChatMessageTypeHuman,
 				Parts: []llms.ContentPart{
-					llms.BinaryPart("image/png", img),
+					llms.BinaryPart(mimeOf(s.ImagePath), img),
 					llms.TextPart(prompt.OCRUser),
 				},
 			},
 		}
-		text, err := d.call(ctx, "ocr", st.Provider, st.Model, messages, st.Temperature, st.MaxTokens)
+		text, err := d.call(ctx, "ocr", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
 		if err != nil {
 			s.Err = err
 			return s, err
@@ -119,7 +121,7 @@ func Translate(d Deps) func(ctx context.Context, s State) (State, error) {
 			llms.TextParts(llms.ChatMessageTypeSystem, prompt.TranslateSystem),
 			llms.TextParts(llms.ChatMessageTypeHuman, s.OCRText),
 		}
-		text, err := d.call(ctx, "translate", st.Provider, st.Model, messages, st.Temperature, st.MaxTokens)
+		text, err := d.call(ctx, "translate", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
 		if err != nil {
 			s.Err = err
 			return s, err
@@ -138,7 +140,7 @@ func Proofread(d Deps) func(ctx context.Context, s State) (State, error) {
 			llms.TextParts(llms.ChatMessageTypeSystem, prompt.ProofreadSystem),
 			llms.TextParts(llms.ChatMessageTypeHuman, s.OCRText),
 		}
-		text, err := d.call(ctx, "proofread", st.Provider, st.Model, messages, st.Temperature, st.MaxTokens)
+		text, err := d.call(ctx, "proofread", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
 		if err != nil {
 			s.Err = err
 			return s, err
@@ -170,7 +172,7 @@ func Expert(d Deps) func(ctx context.Context, s State) (State, error) {
 			llms.TextParts(llms.ChatMessageTypeSystem, prompt.ExpertSystem),
 			llms.TextParts(llms.ChatMessageTypeHuman, s.OCRText),
 		}
-		text, err := d.call(ctx, "expert", st.Provider, st.Model, messages, st.Temperature, st.MaxTokens)
+		text, err := d.call(ctx, "expert", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
 		if err != nil {
 			s.Err = err
 			return s, err
@@ -191,7 +193,7 @@ func Analyze(d Deps) func(ctx context.Context, s State) (State, error) {
 			llms.TextParts(llms.ChatMessageTypeSystem, prompt.AnalyzeSystem),
 			llms.TextParts(llms.ChatMessageTypeHuman, input),
 		}
-		text, err := d.call(ctx, "analyze", st.Provider, st.Model, messages, st.Temperature, st.MaxTokens)
+		text, err := d.call(ctx, "analyze", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
 		if err != nil {
 			s.Err = err
 			return s, err
@@ -199,6 +201,22 @@ func Analyze(d Deps) func(ctx context.Context, s State) (State, error) {
 		s.FinalReport = text
 		s.Err = nil
 		return s, nil
+	}
+}
+
+// mimeOf 按扩展名推断图片 MIME（默认 image/png）。
+func mimeOf(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".gif":
+		return "image/gif"
+	default:
+		return "image/png"
 	}
 }
 

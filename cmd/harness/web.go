@@ -5,12 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,14 +23,53 @@ import (
 // serveWeb 由 main() 调用；解析旗标后进入 Web 模式。
 func serveWebCmd() {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", "", `HTTP 监听地址（默认自动选择空闲端口）`)
-	cfgPath := fs.String("config", "config/ai.yml", "配置文件路径")
+	addr := fs.String("addr", "", `HTTP 监听地址（默认 :8000，被占用则自动挑选空闲端口）`)
+	cfgPath := fs.String("config", defaultConfigPath, "总配置文件路径")
 	noBrowser := fs.Bool("no-browser", false, "不自动打开浏览器")
 	_ = fs.Parse(os.Args[1:]) // 未识别的参数会被忽略，保持零配置可用
 	serveWeb(*addr, *cfgPath, *noBrowser)
 }
 
-// pickAddr 返回可绑定的监听地址：addr 非空直接用；为空则从内核获取随机空闲端口。
+// applyLogLevel 按 config.logging.level 设置 slog 默认级别。
+func applyLogLevel(level string) {
+	switch strings.ToLower(level) {
+	case "debug":
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	case "warn", "warning":
+		slog.SetLogLoggerLevel(slog.LevelWarn)
+	case "error":
+		slog.SetLogLoggerLevel(slog.LevelError)
+	default:
+		slog.SetLogLoggerLevel(slog.LevelInfo)
+	}
+}
+
+// defaultAddr 首选监听地址：端口 8000；仅当它被占用时才回退随机空闲端口。
+const defaultAddr = ":8000"
+
+// reserveAddr 确定监听地址：addr 为空时取 defaultAddr，尝试绑定成功即返回；
+// 若该端口已被占用，则回退到一个随机空闲端口并提示；其他错误（如权限不足）直接返回。
+func reserveAddr(addr string) (string, int, error) {
+	if addr == "" {
+		addr = defaultAddr
+	}
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return "", 0, fmt.Errorf("invalid addr %q: %w", addr, err)
+	}
+	port := pickPort(addr)
+	l, err := net.Listen("tcp", addr)
+	if err == nil {
+		_ = l.Close()
+		return addr, port, nil
+	}
+	if !isAddrInUse(err) {
+		return "", 0, fmt.Errorf("listen %s: %w", addr, err)
+	}
+	fmt.Printf("端口 %d 已被占用，改用随机空闲端口...\n", port)
+	return pickAddr("")
+}
+
+// pickAddr 从内核获取一个随机空闲端口。
 func pickAddr(addr string) (string, int, error) {
 	if addr != "" {
 		_, port, err := net.SplitHostPort(addr)
@@ -43,6 +84,36 @@ func pickAddr(addr string) (string, int, error) {
 	}
 	defer l.Close()
 	return l.Addr().String(), l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// pickPort 从监听地址串中取端口号（仅用于展示）。
+func pickPort(addr string) int {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	return atoi(port)
+}
+
+// isAddrInUse 判断错误是否为「端口已被占用」。
+func isAddrInUse(err error) bool {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	// 兜底：Windows 的 WSAEADDRINUSE 未必能映射到 syscall.EADDRINUSE，
+	// 按各平台/语言下的常见文案判断。
+	msg := strings.ToLower(err.Error())
+	for _, hint := range []string{
+		"in use",
+		"only one usage of each socket address",
+		"只允许使用一次",
+		"正在使用的地址",
+	} {
+		if strings.Contains(msg, hint) {
+			return true
+		}
+	}
+	return false
 }
 
 // atoi 宽松解析端口字符串（解析失败返回 0，仅用于展示）。
@@ -80,23 +151,46 @@ func serveWeb(addr, cfgPath string, noBrowser bool) {
 		fmt.Fprintln(os.Stderr, "harness:", err)
 		os.Exit(1)
 	}
+	applyLogLevel(cfg.Logging.Level)
+
 	srv, err := api.New(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "harness:", err)
 		os.Exit(1)
 	}
+	srv.Version = version
 	defer srv.Close()
 
-	listenAddr, port, err := pickAddr(addr)
+	// 命令行旗标优先，其次 config.server.addr，两者都为空则用默认端口 8000
+	if addr == "" {
+		addr = cfg.Server.Addr
+	}
+	if noBrowser {
+		// 显式关闭；否则跟随配置
+	} else {
+		noBrowser = !cfg.Server.OpenBrowser
+	}
+
+	// 首选 8000；仅当该端口已被占用时才回退随机空闲端口
+	listenAddr, port, err := reserveAddr(addr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "harness:", err)
 		os.Exit(1)
 	}
 
+	readHeaderTimeout := time.Duration(cfg.Server.ReadHeaderTimeoutSeconds) * time.Second
+	if readHeaderTimeout <= 0 {
+		readHeaderTimeout = 10 * time.Second
+	}
+	shutdownTimeout := time.Duration(cfg.Server.ShutdownTimeoutSeconds) * time.Second
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = 5 * time.Second
+	}
+
 	httpSrv := &http.Server{
 		Addr:              listenAddr,
 		Handler:           srv,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
 	bound := make(chan error, 1)
@@ -143,7 +237,7 @@ func serveWeb(addr, cfgPath string, noBrowser bool) {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 	fmt.Println("shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
 }

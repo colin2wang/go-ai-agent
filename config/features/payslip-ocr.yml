@@ -1,0 +1,78 @@
+# ============================================================================
+# 子功能：工资单 OCR 审读
+# ----------------------------------------------------------------------------
+# 由 config.yml 的 features[].config 引用；一个子功能 = 一条工作流 + 各步骤的
+# provider/model/提示词/参数。步骤与工作流图表（internal/graph）一一对应。
+#
+# 工作流：ocr(VLM) → translate → proofread ─┬→ expert → analyze → END
+#           ↑______ 校验失败/存疑时回退重试 ≤ max-retries ______┘
+# ============================================================================
+id: payslip-ocr
+name: 工资单 OCR 审读
+description: 上传工资单截图，自动完成 OCR 提取 → 翻译 → 审读校验 → 专家分析 → 汇总报告
+icon: receipt
+order: 1
+
+# ---- 输入声明（单文件）----
+input:
+  kind: image
+  multiple: false
+  accept: image/png,image/jpeg,image/webp
+  hint: 本地模型审读通常需要 1–5 分钟
+
+# ---- 工作流声明 ----
+workflow:
+  type: payslip-ocr          # 编排类型（对应 internal/graph 内置图）
+  entry: ocr                 # 入口节点
+  max-retries: 2             # proofread 失败/存疑时回退重试 ocr 的上限
+  pipeline:                  # 展示用节点顺序（同时用于概览页的流程链）
+    - ocr
+    - translate
+    - proofread
+    - expert
+    - analyze
+
+# ---- 各步骤独立配置：provider 引用 ai.yml 的 providers[].name ----
+# prompt-template 为内置提示词模板名（实现见 internal/prompt，预留可插拔）。
+steps:
+  # 视觉 OCR：截图 → 结构化 JSON（需 VLM）
+  ocr:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    prompt-template: ocr-default
+    temperature: 0.1
+    max-tokens: 8192
+    reasoning-enabled: false        # 视觉提取关闭思考，避免吃光 token 预算
+
+  # 翻译：结构化 JSON → 英文（可换成纯文本模型，如 qwen3-8b）
+  translate:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    prompt-template: translate-default
+    temperature: 0.3
+    max-tokens: 4096
+
+  # 审读校验：逐字段核对，输出 valid + issues
+  proofread:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    prompt-template: proofread-default
+    temperature: 0.1
+    max-tokens: 4096
+    reasoning-enabled: true
+
+  # 专家分析：薪酬/税务视角的专业报告
+  expert:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    prompt-template: expert-default
+    temperature: 0.5
+    max-tokens: 4096
+
+  # 汇总：整合前序结果输出最终报告
+  analyze:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    prompt-template: analyze-default
+    temperature: 0.3
+    max-tokens: 8192
