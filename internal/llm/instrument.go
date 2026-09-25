@@ -70,9 +70,11 @@ func (f *Factory) RecordChat(provider, model string, promptTokens, completionTok
 }
 
 // IoLogHook 输入/输出日志钩子（由 iolog 包注入实现，避免包循环）。
+// requestID 由调用方经 NewID 生成一次，同一次调用的输入/输出日志透传共用，便于配对检索。
 type IoLogHook struct {
-	OnRequest  func(provider, model string, messages []llms.MessageContent)
-	OnResponse func(provider, model string, resp *llms.ContentResponse, err error, latencyMs int)
+	NewID      func() string
+	OnRequest  func(requestID, provider, model string, messages []llms.MessageContent)
+	OnResponse func(requestID, provider, model string, resp *llms.ContentResponse, err error, latencyMs int)
 }
 
 // instrumentedLLM 在真实 LLM 外包一层：io-log + 耗时/Token/错误统计。
@@ -84,14 +86,18 @@ type instrumentedLLM struct {
 }
 
 func (w *instrumentedLLM) GenerateContent(ctx context.Context, messages []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
+	id := ""
 	if h := w.factory.ioLog; h != nil && h.OnRequest != nil {
-		h.OnRequest(w.provider, w.model, messages)
+		if h.NewID != nil {
+			id = h.NewID()
+		}
+		h.OnRequest(id, w.provider, w.model, messages)
 	}
 	start := time.Now()
 	resp, err := w.inner.GenerateContent(ctx, messages, opts...)
 	latency := time.Since(start).Milliseconds()
 	if h := w.factory.ioLog; h != nil && h.OnResponse != nil {
-		h.OnResponse(w.provider, w.model, resp, err, int(latency))
+		h.OnResponse(id, w.provider, w.model, resp, err, int(latency))
 	}
 	pt, ct := usageTokens(resp)
 	w.factory.stats.record(statEntry{

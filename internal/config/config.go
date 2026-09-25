@@ -107,6 +107,8 @@ type Chat struct {
 	StreamDefault   *bool  `yaml:"stream-default"`   // 默认是否流式（nil = 跟随全局 stream-output）
 	MaxHistory      int    `yaml:"max-history"`      // 发送给模型的历史消息条数上限（0 = 不限制）
 	ReasoningEffort string `yaml:"reasoning-effort"` // 思考力度：none/minimal/low/medium/high/xhigh（空 = 不发送，跟随端点默认）
+	MaxImages       int    `yaml:"max-images"`       // 单条消息最多附带的图片数（0 = 默认 4，仅视觉模型可用）
+	MaxImageMB      int    `yaml:"max-image-mb"`     // 单张图片解码后体积上限 MB（0 = 默认 8）
 }
 
 // validReasoningEffort chat.reasoning-effort 的合法取值（OpenAI 兼容协议，LM Studio 同样接受）。
@@ -381,6 +383,12 @@ func (c *Config) validate() error {
 			}
 			if f.Chat.ReasoningEffort != "" && !validReasoningEffort[f.Chat.ReasoningEffort] {
 				return fmt.Errorf("features.%s.chat.reasoning-effort %q 无效（支持 none/minimal/low/medium/high/xhigh，留空则不发送）", f.ID, f.Chat.ReasoningEffort)
+			}
+			if f.Chat.MaxImages < 0 {
+				return fmt.Errorf("features.%s.chat.max-images 不能为负数", f.ID)
+			}
+			if f.Chat.MaxImageMB < 0 {
+				return fmt.Errorf("features.%s.chat.max-image-mb 不能为负数", f.ID)
 			}
 		}
 		for name, st := range f.Steps {

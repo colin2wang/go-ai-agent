@@ -1,8 +1,10 @@
-// chat.go 对话子功能后端：直连 OpenAI 兼容端点的三个能力——
+// chat.go 对话子功能后端：直连 OpenAI 兼容端点的四个能力——
 //  1. 模型列表：GET {base-url}/v1/models（供前端选择模型）；
 //  2. 流式探测：发一条最小 chat/completions（stream=true）判断端点是否支持 SSE；
 //  3. 对话转发：chat/completions 以 SSE 事件（meta/delta/done/error）透传给浏览器，
-//     端点不支持流式或前端显式关闭时回退普通调用一次性下发。
+//     端点不支持流式或前端显式关闭时回退普通调用一次性下发；
+//  4. 图片输入：messages[].images 以 base64 随请求上传，转成 OpenAI 多模态
+//     content 片段（text + image_url data URL）后转发，仅对视觉模型开放。
 //
 // 统计落库与 io-log 通过 Factory 的导出方法埋点，与工作流路径保持一致。
 package api
@@ -11,12 +13,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,10 +30,20 @@ import (
 	"go-ai-agent/internal/config"
 )
 
+// chatImage 一条消息附带的图片（视觉模型输入）。
+// Data 为纯 base64（不含 "data:image/png;base64," 前缀），前缀由服务端拼装。
+type chatImage struct {
+	Name string `json:"name,omitempty"`
+	Mime string `json:"mime"`
+	Data string `json:"data"`
+}
+
 // chatMessage 一条对话消息（role: system | user | assistant）。
+// Images 仅 user 消息可用（纯文本请求体保持原样，不干扰原有调用方）。
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content string      `json:"content"`
+	Images  []chatImage `json:"images,omitempty"`
 }
 
 // chatSendRequest POST /api/chat/send 请求体。
@@ -40,6 +55,24 @@ type chatSendRequest struct {
 	Stream      *bool         `json:"stream"`      // nil = 跟随子功能/全局默认
 	Temperature *float64      `json:"temperature"` // nil = 步骤配置
 	MaxTokens   int           `json:"max_tokens"`  // nil/0 = 步骤配置
+}
+
+// chatImageURL / chatPart —— OpenAI 多模态 content 片段（type=text | image_url）。
+type chatImageURL struct {
+	URL string `json:"url"`
+}
+
+type chatPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *chatImageURL `json:"image_url,omitempty"`
+}
+
+// chatWireMessage 实际发往 provider 的消息：纯文本时 content 仍为字符串，
+// 带图片时才是片段数组——部分本地端点只接受字符串 form，不做无谓的数组化。
+type chatWireMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
 }
 
 // chatUsage OpenAI 协议的 token 用量。
@@ -74,12 +107,12 @@ type chatStreamChunk struct {
 
 // chatUpstream 一次发往 provider 的 chat/completions 请求。
 type chatUpstream struct {
-	Model           string        `json:"model"`
-	Messages        []chatMessage `json:"messages"`
-	Temperature     float64       `json:"temperature"`
-	MaxTokens       int           `json:"max_tokens,omitempty"`
-	Stream          bool          `json:"stream"`
-	ReasoningEffort string        `json:"reasoning_effort,omitempty"` // 思考力度（empty = 不发送）
+	Model           string            `json:"model"`
+	Messages        []chatWireMessage `json:"messages"`
+	Temperature     float64           `json:"temperature"`
+	MaxTokens       int               `json:"max_tokens,omitempty"`
+	Stream          bool              `json:"stream"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"` // 思考力度（empty = 不发送）
 }
 
 // chatModelInfo 模型列表中的单个模型（附视觉/推理能力粗判）。
@@ -258,7 +291,7 @@ func (s *Server) handleChatStreamCheck(w http.ResponseWriter, r *http.Request) {
 func probeStream(ctx context.Context, client *http.Client, p config.Provider, model string) (bool, string) {
 	payload := chatUpstream{
 		Model:    model,
-		Messages: []chatMessage{{Role: "user", Content: "ping"}},
+		Messages: wireMessages([]chatMessage{{Role: "user", Content: "ping"}}),
 		Stream:   true,
 	}
 	resp, err := doProviderRequest(ctx, client, p, http.MethodPost, "/chat/completions", payload)
@@ -298,9 +331,126 @@ func scanSSEHead(br *bufio.Reader, limit int64) (bool, string) {
 	return false, "SSE 帧头超出读取上限"
 }
 
+// 对话图片默认上限（子功能 chat.max-images / chat.max-image-mb 可覆盖）。
+const (
+	defaultChatMaxImages  = 4
+	defaultChatMaxImageMB = 8
+	// 请求体硬上限：图片以 base64 内联（膨胀约 1.34 倍），按默认 4 张 × 8MB 量级放宽。
+	maxChatBodyBytes = 64 << 20
+)
+
+// allowedChatImageMimes 对话图片允许的媒体类型（OpenAI 兼容端点的普遍集合）。
+var allowedChatImageMimes = map[string]bool{
+	"image/png": true, "image/jpeg": true, "image/webp": true,
+	"image/gif": true, "image/bmp": true,
+}
+
+// chatMaxImages / chatMaxImageMB 取子功能图片限制（未配置时回退默认值）。
+func chatMaxImages(f config.Feature) int {
+	if f.Chat.MaxImages > 0 {
+		return f.Chat.MaxImages
+	}
+	return defaultChatMaxImages
+}
+
+func chatMaxImageMB(f config.Feature) int {
+	if f.Chat.MaxImageMB > 0 {
+		return f.Chat.MaxImageMB
+	}
+	return defaultChatMaxImageMB
+}
+
+// validateChatImages 校验待发送图片：仅 user 消息可附图，并限制单条数量、
+// 单张体积与媒体类型；同时就地洗掉客户端误带的 data URL 前缀并剔除空数据项。
+func validateChatImages(messages []chatMessage, maxImages, maxBytes int) error {
+	for i := range messages {
+		m := &messages[i]
+		if len(m.Images) == 0 {
+			continue
+		}
+		if m.Role != "user" {
+			return fmt.Errorf("图片只能随 user 消息发送（第 %d 条为 %s）", i+1, m.Role)
+		}
+		if len(m.Images) > maxImages {
+			return fmt.Errorf("单条消息最多 %d 张图片，收到 %d 张", maxImages, len(m.Images))
+		}
+		cleaned := make([]chatImage, 0, len(m.Images))
+		for j, img := range m.Images {
+			mime := strings.ToLower(strings.TrimSpace(img.Mime))
+			if !allowedChatImageMimes[mime] {
+				return fmt.Errorf("第 %d 条消息第 %d 张图片类型不支持：%q（支持 png/jpeg/webp/gif/bmp）", i+1, j+1, img.Mime)
+			}
+			data := stripDataURLPrefix(img.Data)
+			if data == "" {
+				continue
+			}
+			if len(data)*3/4 > maxBytes { // base64 长度换算解码后字节（保守估计）
+				return fmt.Errorf("第 %d 条消息第 %d 张图片超过 %dMB 上限", i+1, j+1, maxBytes>>20)
+			}
+			if err := decodeBase64Len(data); err != nil {
+				return fmt.Errorf("第 %d 条消息第 %d 张图片不是合法 base64: %w", i+1, j+1, err)
+			}
+			img.Data = data
+			img.Mime = mime
+			if img.Name == "" {
+				img.Name = "image-" + strconv.Itoa(j+1)
+			}
+			cleaned = append(cleaned, img)
+		}
+		if len(cleaned) == 0 {
+			return fmt.Errorf("第 %d 条消息的图片内容为空", i+1)
+		}
+		m.Images = cleaned
+	}
+	return nil
+}
+
+// stripDataURLPrefix 去掉误传的 "data:image/png;base64," 前缀（图片已统一走 mime 字段）。
+func stripDataURLPrefix(data string) string {
+	if !strings.HasPrefix(data, "data:") {
+		return data
+	}
+	if idx := strings.Index(data, ","); idx >= 0 {
+		return data[idx+1:]
+	}
+	return data
+}
+
+// decodeBase64Len 流式解码以校验 base64 合法性（不保留解码结果，避免多占用一份内存）。
+func decodeBase64Len(data string) error {
+	r := base64.NewDecoder(base64.StdEncoding, strings.NewReader(data))
+	_, err := io.Copy(io.Discard, r)
+	return err
+}
+
+// wireMessages 将内部消息转为 OpenAI 协议结构（带图的消息展开为 content 数组）。
+func wireMessages(messages []chatMessage) []chatWireMessage {
+	out := make([]chatWireMessage, 0, len(messages))
+	for _, m := range messages {
+		if len(m.Images) == 0 {
+			out = append(out, chatWireMessage{Role: m.Role, Content: m.Content})
+			continue
+		}
+		parts := make([]chatPart, 0, len(m.Images)+1)
+		if strings.TrimSpace(m.Content) != "" {
+			parts = append(parts, chatPart{Type: "text", Text: m.Content})
+		}
+		for _, img := range m.Images {
+			parts = append(parts, chatPart{Type: "image_url", ImageURL: &chatImageURL{URL: imageDataURL(img)}})
+		}
+		out = append(out, chatWireMessage{Role: m.Role, Content: parts})
+	}
+	return out
+}
+
+// imageDataURL 拼装 data URL（端点接受的 image_url 形式，避开服务端落盘/外链）。
+func imageDataURL(img chatImage) string {
+	return "data:" + img.Mime + ";base64," + img.Data
+}
+
 // handleChatSend godoc
 // @Summary      发送对话消息（SSE 流式）
-// @Description  将消息列表转发到所选 provider 的 chat/completions；默认以 SSE 逐块下发（事件 meta/delta/done/error），端点不支持流式时自动降级为一次性 JSON（附 stream_fallback/note），stream=false 时直接一次性 JSON 返回
+// @Description  将消息列表转发到所选 provider 的 chat/completions；默认以 SSE 逐块下发（事件 meta/delta/done/error），端点不支持流式时自动降级为一次性 JSON（附 stream_fallback/note），stream=false 时直接一次性 JSON 返回。messages[].images 可附带图片（base64，仅视觉模型与 user 消息）
 // @Tags         chat
 // @Accept       json
 // @Produce      application/json,text/event-stream
@@ -311,7 +461,13 @@ func scanSSEHead(br *bufio.Reader, limit int64) (bool, string) {
 // @Router       /api/chat/send [post]
 func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	var req chatSendRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxChatBodyBytes)).Decode(&req); err != nil {
+		// 图片以 base64 内联，超限时只会读到截断的 JSON，这里给出可行动的提示
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+			fail(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("请求体超过 %dMB 上限，请减少图片数量或改用体积更小的图片", maxChatBodyBytes>>20))
+			return
+		}
 		fail(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
@@ -346,6 +502,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 
 	// 历史裁剪：只保留最近 max-history 条（system 由服务端统一注入）
 	messages := trimChatHistory(req.Messages, feature.Chat.MaxHistory)
+	if err := validateChatImages(messages, chatMaxImages(feature), chatMaxImageMB(feature)<<20); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if feature.Chat.SystemPrompt != "" {
 		messages = append([]chatMessage{{Role: "system", Content: feature.Chat.SystemPrompt}}, messages...)
 	}
@@ -367,6 +527,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		slog.String("feature", feature.ID),
 		slog.String("provider", providerName),
 		slog.String("model", model),
+		slog.Int("images", countChatImages(messages)),
 		slog.Bool("stream", stream))
 
 	if stream {
@@ -385,7 +546,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p config.Pro
 		fail(w, http.StatusInternalServerError, "当前服务不支持流式响应")
 		return
 	}
-	payload := chatUpstream{Model: model, Messages: messages, Temperature: temperature, MaxTokens: maxTokens, Stream: true, ReasoningEffort: reasoningEffort}
+	payload := chatUpstream{Model: model, Messages: wireMessages(messages), Temperature: temperature, MaxTokens: maxTokens, Stream: true, ReasoningEffort: reasoningEffort}
 	client := s.factory.HTTPClient(p)
 	start := time.Now()
 	resp, err := doProviderRequest(r.Context(), client, p, http.MethodPost, "/chat/completions", payload)
@@ -475,7 +636,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p config.Pro
 	latency := time.Since(start)
 	// 上游未回传 usage 时按字符数粗估（仅用于统计展示，不追求精确）
 	if usage.PromptTokens == 0 {
-		usage.PromptTokens = estimateTokens(messagesText(messages))
+		usage.PromptTokens = estimatePromptTokens(messages)
 	}
 	if usage.CompletionTokens == 0 {
 		usage.CompletionTokens = estimateTokens(answer.String() + reasoning.String())
@@ -507,7 +668,7 @@ func (s *Server) collectChat(w http.ResponseWriter, r *http.Request, p config.Pr
 func (s *Server) collectChatWithNote(w http.ResponseWriter, r *http.Request, p config.Provider, model string,
 	messages []chatMessage, temperature float64, maxTokens int, reasoningEffort, note string) {
 
-	payload := chatUpstream{Model: model, Messages: messages, Temperature: temperature, MaxTokens: maxTokens, ReasoningEffort: reasoningEffort}
+	payload := chatUpstream{Model: model, Messages: wireMessages(messages), Temperature: temperature, MaxTokens: maxTokens, ReasoningEffort: reasoningEffort}
 	client := s.factory.HTTPClient(p)
 	start := time.Now()
 	resp, err := doProviderRequest(r.Context(), client, p, http.MethodPost, "/chat/completions", payload)
@@ -546,7 +707,7 @@ func (s *Server) respondChatJSON(w http.ResponseWriter, p config.Provider, model
 	usage := out.Usage
 	if usage == nil {
 		usage = &chatUsage{
-			PromptTokens:     estimateTokens(messagesText(messages)),
+			PromptTokens:     estimatePromptTokens(messages),
 			CompletionTokens: estimateTokens(content + reason),
 		}
 	}
@@ -592,11 +753,12 @@ func (s *Server) chatStreamDefault(f config.Feature) bool {
 	return s.cfg.LLM.StreamOutput
 }
 
-// trimChatHistory 保留最近 max 条消息（去掉空 content），max<=0 时不限制数量。
+// trimChatHistory 保留最近 max 条消息（去掉文本与图片均为空的），max<=0 时不限制数量。
+// 只图片无文本的 user 消息是合法的多模态输入，不能当空消息丢弃。
 func trimChatHistory(in []chatMessage, max int) []chatMessage {
 	cleaned := make([]chatMessage, 0, len(in))
 	for _, m := range in {
-		if strings.TrimSpace(m.Content) == "" {
+		if strings.TrimSpace(m.Content) == "" && len(m.Images) == 0 {
 			continue
 		}
 		if m.Role != "user" && m.Role != "assistant" {
@@ -650,6 +812,7 @@ func writeSSE(w io.Writer, event string, v any) {
 }
 
 // toMessageContents 将对话消息转为 langchaingo 结构（仅供 io-log 记录）。
+// 图片只记录类型与体积的占位文本，不把 base64 写入日志。
 func toMessageContents(messages []chatMessage) []llms.MessageContent {
 	out := make([]llms.MessageContent, 0, len(messages))
 	for _, m := range messages {
@@ -660,9 +823,27 @@ func toMessageContents(messages []chatMessage) []llms.MessageContent {
 		case "assistant":
 			role = llms.ChatMessageTypeAI
 		}
-		out = append(out, llms.TextParts(role, m.Content))
+		parts := []llms.ContentPart{llms.TextContent{Text: m.Content}}
+		for _, img := range m.Images {
+			parts = append(parts, llms.TextContent{Text: imageLogMarker(img)})
+		}
+		out = append(out, llms.MessageContent{Role: role, Parts: parts})
 	}
 	return out
+}
+
+// imageLogMarker io-log 中的图片占位描述。
+func imageLogMarker(img chatImage) string {
+	return fmt.Sprintf("<image name=%s mime=%s base64_bytes=%d>", img.Name, img.Mime, len(img.Data))
+}
+
+// countChatImages 本次请求携带的图片总数（日志字段）。
+func countChatImages(messages []chatMessage) int {
+	n := 0
+	for _, m := range messages {
+		n += len(m.Images)
+	}
+	return n
 }
 
 // messagesText 拼接全部消息文本（估算 prompt token 用）。
@@ -673,6 +854,15 @@ func messagesText(messages []chatMessage) string {
 	}
 	return b.String()
 }
+
+// estimatePromptTokens 端点未回传 usage 时的 prompt 估算：文本按字符数，
+// 图片各端点计费口径不一，统一按固定额度计入（仅用于统计展示，不追求精确）。
+func estimatePromptTokens(messages []chatMessage) int {
+	return estimateTokens(messagesText(messages)) + countChatImages(messages)*imageTokenAllowance
+}
+
+// imageTokenAllowance 单张图片计入估算的 token 数。
+const imageTokenAllowance = 512
 
 // estimateTokens 字符数粗估 token：ASCII 约 4 字符/token，其余（如中文）约 1 字符/token。
 func estimateTokens(s string) int {

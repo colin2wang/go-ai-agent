@@ -11,7 +11,7 @@ import (
 
 	httpSwagger "github.com/swaggo/http-swagger"
 
-	_ "go-ai-agent/docs" // swag 生成的 OpenAPI 文档
+	_ "go-ai-agent/api" // swag 生成的 OpenAPI 文档
 	"go-ai-agent/internal/llm"
 	"go-ai-agent/internal/stats"
 )

@@ -8,15 +8,12 @@ import (
 	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/graph"
 	"go-ai-agent/internal/graph/nodes"
-	"go-ai-agent/internal/iolog"
 	"go-ai-agent/internal/llm"
 	"go-ai-agent/internal/stats"
+	"go-ai-agent/pkg/iolog"
 )
 
-// defaultConfigPath 总配置入口（内部再展开 ai.yml 与 features/*.yml）。
-const defaultConfigPath = "config/config.yml"
-
-// runCLI 单图审读：读配置 → 建 provider → 跑流水线 → 打印最终报告。
+// runCLI 单图审读（第一个参数为图片路径）：读配置 → 建 provider → 跑流水线 → 打印最终报告。
 func runCLI() {
 	if err := cliRun(); err != nil {
 		fmt.Fprintln(os.Stderr, "harness:", err)

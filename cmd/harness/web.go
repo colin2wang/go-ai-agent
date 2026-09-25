@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -20,28 +19,14 @@ import (
 	"go-ai-agent/internal/config"
 )
 
-// serveWeb 由 main() 调用；解析旗标后进入 Web 模式。
-func serveWebCmd() {
+// serveWebCmd 进入 Web 模式；args 为子命令后的剩余旗标（nil 表示无参数）。
+func serveWebCmd(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "", `HTTP 监听地址（默认 :8000，被占用则自动挑选空闲端口）`)
 	cfgPath := fs.String("config", defaultConfigPath, "总配置文件路径")
 	noBrowser := fs.Bool("no-browser", false, "不自动打开浏览器")
-	_ = fs.Parse(os.Args[1:]) // 未识别的参数会被忽略，保持零配置可用
+	_ = fs.Parse(args) // 未识别的参数会被忽略，保持零配置可用
 	serveWeb(*addr, *cfgPath, *noBrowser)
-}
-
-// applyLogLevel 按 config.logging.level 设置 slog 默认级别。
-func applyLogLevel(level string) {
-	switch strings.ToLower(level) {
-	case "debug":
-		slog.SetLogLoggerLevel(slog.LevelDebug)
-	case "warn", "warning":
-		slog.SetLogLoggerLevel(slog.LevelWarn)
-	case "error":
-		slog.SetLogLoggerLevel(slog.LevelError)
-	default:
-		slog.SetLogLoggerLevel(slog.LevelInfo)
-	}
 }
 
 // defaultAddr 首选监听地址：端口 8000；仅当它被占用时才回退随机空闲端口。

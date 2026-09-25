@@ -20,10 +20,10 @@ import (
 	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/graph"
 	"go-ai-agent/internal/graph/nodes"
-	"go-ai-agent/internal/iolog"
 	"go-ai-agent/internal/llm"
 	"go-ai-agent/internal/stats"
 	"go-ai-agent/internal/tmpl"
+	"go-ai-agent/pkg/iolog"
 )
 
 // Server HTTP 服务，内部持有已初始化的流水线依赖。
@@ -93,6 +93,8 @@ type FeatureChat struct {
 	DefaultProvider string `json:"default_provider"`
 	StreamDefault   bool   `json:"stream_default"`
 	MaxHistory      int    `json:"max_history"`
+	MaxImages       int    `json:"max_images"`   // 单条消息最多附带图片数（仅视觉模型）
+	MaxImageMB      int    `json:"max_image_mb"` // 单张图片体积上限 MB
 }
 
 // ProviderInfo AI 端点对外描述（不含 api-key）。
@@ -301,6 +303,8 @@ func (s *Server) featureInfos() []FeatureInfo {
 				DefaultProvider: orDefault(f.Chat.DefaultProvider, s.cfg.LLM.DefaultProvider),
 				StreamDefault:   s.chatStreamDefault(f),
 				MaxHistory:      f.Chat.MaxHistory,
+				MaxImages:       chatMaxImages(f),
+				MaxImageMB:      chatMaxImageMB(f),
 			},
 		})
 	}

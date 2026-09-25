@@ -21,10 +21,10 @@ llm:
   max-tokens: 8192
   debug-request-log: false
 
-  # LLM 调用输入/输出日志（io-log）：每次调用生成 UUID 关联输入与输出（UUID 仅用于日志，
-  # 不提交给 LLM）。输入 system/user 按前后各 head-chars/tail-chars 截断并记录总字数；
-  # 输出回答全文；推理（thinking）部分前后各 head-chars/tail-chars 截断，中间省略，记录总字数。
-  # 多模态输入只记录文件名与媒体类型，不记录二进制内容。
+  # LLM 调用输入/输出日志（io-log）：每次调用生成一个 request_id，输入与输出日志共用同一 ID 便于配对
+  # （UUID 仅用于日志，不提交给 LLM）。文本统一折叠为单行（换行→空格），按前后各 head-chars/tail-chars
+  # 截断并记录总字数；多轮对话仅详细输出 system 与最后两条消息，更早历史以 history_msgs 计数代替。
+  # 多模态输入只记录媒体类型与字节数，不记录二进制内容。
   io-log:
     enabled: true
     head-chars: 1000

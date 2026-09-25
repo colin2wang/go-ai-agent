@@ -8,7 +8,7 @@
 - **API**：REST + OpenAPI 文档（swaggo，`/swagger/index.html`）
 - **前端**：Vue3 + TypeScript + Vite（左侧主菜单 + 子功能 + 对话 + 概览仪表盘），构建产物经 `go:embed` 打进单个二进制
 - **配置**：三层分离 —— `config.yml`（总配置）/ `ai.yml`（AI provider）/ `features/*.yml`（子功能）
-- **部署**：`dist\harness.exe` 双击即用——自动选端口、自动打开浏览器
+- **部署**：`dist\harness.exe` 双击即用——自动选端口、自动打开浏览器；消息队列与定时任务作为它的子命令（`harness mq` / `harness cron`），不再拆成多个二进制
 
 > 📸 界面截图见 [SCREENSHOT.md](SCREENSHOT.md)（概览仪表盘 / 工资单审读 / 图书目录识别）
 
@@ -24,8 +24,8 @@
 | 模板化输出 | 输出经类 FreeMarker 的模板渲染（`internal/tmpl`），内置模板随二进制打包，可用外部目录覆盖 |
 | 概览仪表盘 | 侧边栏菜单 + 概览页：调用量/Token/耗时/成功率指标卡、趋势图、模型用量、最近调用 |
 | 端点连通性 | 概览页加载时自动探测一次 AI 端点（`GET {base-url}/v1/models`），并支持逐端点/一键手动「测试」；无实时轮询 |
-| AI 对话 | 与工作流子功能同级（`kind: chat`）：选择任意 provider、拉取 OpenAI 兼容 `/v1/models` 模型列表、自动探测流式能力并默认 SSE 流式显示回复 |
-| 视觉（VLM）支持 | `BinaryPart` 多模态输入，任意 OpenAI 兼容视觉模型可直接使用 |
+| AI 对话 | 与工作流子功能同级（`kind: chat`）：选择任意 provider、拉取 OpenAI 兼容 `/v1/models` 模型列表、自动探测流式能力并默认 SSE 流式显示回复；视觉模型可选中后上传图片 |
+| 视觉（VLM）支持 | `BinaryPart` 多模态输入，任意 OpenAI 兼容视觉模型可直接使用；对话页支持文件选择 / 拖拽 / 粘贴上传图片随消息发送 |
 | 思考模型兼容 | 流式接收 + REASONING/ANSWER 分道累积，思考链与回答分别落日志 |
 | 全链路可观测 | io-log 截断日志（UUID 关联输入输出）+ SQLite 调用统计（Token/耗时/成功率，保留期自动清理） |
 | 零配置运行 | 无参数启动 Web 模式，默认 8000 端口并打开浏览器，端口占用时自动切换随机端口 |
@@ -35,13 +35,24 @@
 ### 方式一：直接运行（推荐）
 
 ```powershell
-.\build.ps1          # 构建前端 + 生成 OpenAPI 文档 + 编译到 dist/
+.\build.ps1          # 构建前端 + 生成 OpenAPI 文档 + 编译单个 harness.exe 到 dist/
 cd dist
 .\harness.exe        # 无参数：Web 模式，自动挑空闲端口并打开浏览器
 ```
 
 - Web UI：`http://localhost:8000/`（8000 被占用时自动换随机端口，以控制台打印为准）
 - Swagger：`http://localhost:8000/swagger/index.html`
+
+单个二进制按第一个参数分派运行模式：
+
+| 命令 | 模式 |
+|---|---|
+| `harness` | Web/API 服务（默认，自动选端口 + 打开浏览器） |
+| `harness serve [-addr :8000] [-config p] [-no-browser]` | 同上，显式子命令形式 |
+| `harness <图片路径> [总配置]` | CLI 单图审读，打印最终报告 |
+| `harness mq [-config p]` | 消息队列消费者（骨架） |
+| `harness cron [-interval 1h] [-config p]` | 定时任务调度（骨架） |
+| `harness version` | 打印版本号（由 `-Version` 注入） |
 
 ### 方式二：CLI 单图审读（工资单场景）
 
@@ -53,9 +64,9 @@ cd dist
 ### 方式三：前端开发模式
 
 ```powershell
-cd frontend
-npm install
-npm run dev          # http://localhost:5173，/api 已代理到后端 8080
+cd web
+pnpm install
+pnpm dev          # http://localhost:5173，/api 已代理到后端 8080
 
 # 另开终端运行后端
 cd dist && .\harness.exe -addr :8080 -no-browser
@@ -97,7 +108,7 @@ config/
 | `ai.yml` | `llm.stream-output` | 统一流式接收（默认开启），关闭回退普通调用 |
 | `ai.yml` | `llm.reasoning-enabled` | 思考模式开关，各步骤可独立覆盖 |
 | `features/*.yml` | `kind` | 页面类型：`workflow`（默认，上传执行）/ `chat`（对话界面） |
-| `features/*.yml` | `chat` | 对话专属配置：default-provider / system-prompt / stream-default / max-history |
+| `features/*.yml` | `chat` | 对话专属配置：default-provider / system-prompt / stream-default / max-history / max-images / max-image-mb |
 | `features/*.yml` | `input` | 输入声明：kind / **multiple（多页上传）** / accept / hint，前端据此渲染上传控件 |
 | `features/*.yml` | `output` | 输出声明：template（模板名）/ template-dir（外部模板目录，留空用内置）/ extension（下载扩展名） |
 | `features/*.yml` | `workflow` | 编排类型 / 入口节点 / max-retries（条件边回退上限）/ pipeline（展示顺序） |
@@ -183,8 +194,18 @@ flowchart LR
 2. **选择模型**：切换端点时后端代理 OpenAI 兼容接口 `GET {base-url}/v1/models` 拉取模型列表（可手动刷新重拉）；
 3. **流式回复**：选定模型后自动探测端点是否支持流式（发一条 `stream=true` 的最小请求按 SSE 首帧判定），
    支持则默认流式显示（`event: meta/delta/done` SSE 透传，思考增量单独展示），不支持则自动回退普通一次性返回。
+4. **Markdown 渲染**：回复经 marked（GFM + 换行即 `<br>`）解析、DOMPurify 消毒后以 HTML 渲染；
+   输入区提供「Markdown 渲染」开关，关闭后气泡回退为原始文本（`pre-wrap`），便于核对模型输出的 Markdown 源码。
+   开关状态存于 `localStorage`（`go-ai-agent.chat.markdown.v1`），默认开启。
+5. **图片输入（视觉模型）**：选中模型被判定为视觉能力（端点元数据 `supported_modalities` 等字段，
+   或模型名关键词如 `qwen3-vl`）时，输入区「图片」按钮可用——文件选择对话框、拖拽到消息区、
+   或直接粘贴截图三种方式上传；图片以 base64 随 `POST /api/chat/send` 上报，服务端校验类型/数量/体积后
+   转为 OpenAI 多模态 `content` 片段（`text` + `image_url` data URL）转发。非视觉模型下按钮禁用并提示原因。
+   单条消息最多 `chat.max-images` 张、单张不超过 `chat.max-image-mb` MB；气泡内缩略图可点击看大图。
 
 多轮历史由前端维护并持久化（localStorage），发送时按 `chat.max-history` 裁剪；对话调用同样进 io-log 与 SQLite 统计。
+图片的 base64 不写入 localStorage（配额极易溢出）：刷新后历史气泡仅保留文件名标签，该图不再参与后续轮次；
+同一会话内（未刷新）图片随历史一起下发，因此可以就同一张图继续追问。
 相关接口：`GET /api/providers/models`、`GET /api/providers/stream-check`、`POST /api/chat/send`。
 
 ## 架构
@@ -556,7 +577,9 @@ classDiagram
 ### 目录结构
 
 ```
-├── cmd/harness/          # 入口：main.go（路由分发）/ web.go / cli.go
+├── cmd/
+│   └── harness/          # 唯一入口：main.go（模式分派）/ web.go / cli.go / mq.go / cron.go
+├── api/                  # swag 生成的 OpenAPI 文档（docs.go + swagger.json/yaml）
 ├── internal/
 │   ├── api/              # REST 服务 + Swagger 注解 + 内嵌前端（webdist/）
 │   ├── config/           # config.yml → ai.yml → features/*.yml 三层加载（含 ${ENV:default}、启动期校验）
@@ -565,20 +588,21 @@ classDiagram
 │   │   └── nodes/        # 业务节点 + State 定义
 │   ├── prompt/           # 各步骤提示词模板
 │   ├── stats/            # SQLite 落库 + 保留期清理 + 概览聚合
-│   ├── tmpl/             # 模板渲染引擎 + 内置模板（templates/book-toc/*.tpl）
-│   └── iolog/            # head/tail 截断日志
-├── docs/                 # swag 生成的 OpenAPI 文档
-├── frontend/             # Vue3 + TS + Vite
+│   └── tmpl/             # 模板渲染引擎 + 内置模板（templates/book-toc/*.tpl）
+├── pkg/
+│   └── iolog/            # head/tail 截断日志（可复用基础库）
+├── web/                  # Vue3 + TS + Vite 前端
 │   └── src/
 │       ├── components/   # Sidebar / MetricCard / Sparkline / TrendChart / AppIcon
 │       ├── views/        # OverviewView（概览仪表盘）/ FeatureView（子功能执行页）/ ChatView（对话）
 │       ├── api.ts        # REST 封装     types.ts  # 接口类型     chart.ts  # 图表计算
 │       └── styles.css    # 全局主题（浅色卡片式，绿/蓝/紫/橙强调色）
+├── docs/                 # 人工文档（screenshot/ 截图、tasks/ 任务笔记）
 ├── config/
 │   ├── config.yml        # 总配置（入口）
 │   ├── ai.yml            # AI provider 端点
 │   └── features/         # 各子功能配置（payslip-ocr.yml / book-toc.yml / chat.yml）
-└── build.ps1             # 一键构建（swag → npm → go → dist/）
+└── build.ps1             # 一键构建（swag → pnpm → go → dist/，产出单个 harness.exe）
 ```
 
 ## API 摘要
@@ -590,7 +614,7 @@ classDiagram
 | POST | `/api/providers/check` | 测试 AI 端点连通性；body `{"provider":"name"}` 只测指定端点，省略则并发测试全部端点 |
 | GET | `/api/providers/models?provider=` | 代理 OpenAI 兼容 `GET /v1/models` 拉取模型列表（对话子功能选模型用） |
 | GET | `/api/providers/stream-check?provider=&model=` | 探测指定端点+模型是否支持流式（SSE）返回 |
-| POST | `/api/chat/send` | 发送对话消息：默认 SSE 流式下发（事件 `meta`/`delta`/`done`/`error`），`stream:false` 时一次性 JSON 返回 |
+| POST | `/api/chat/send` | 发送对话消息：默认 SSE 流式下发（事件 `meta`/`delta`/`done`/`error`），`stream:false` 时一次性 JSON 返回；`messages[].images`（base64）随消息上传图片 |
 | POST | `/api/features/{id}/run` | multipart 上传并执行子功能工作流：单文件用 `file` 字段，多页用 `files` 字段（可多个，按上传顺序处理） |
 | POST | `/api/payslip/review` | 工资单场景快捷入口（等价于 `features/payslip-ocr/run`） |
 | GET | `/api/jobs/{id}` | 按任务 ID 查询结果（预留异步扩展） |
@@ -602,12 +626,13 @@ classDiagram
 ## 构建（build.ps1）
 
 ```powershell
-.\build.ps1                  # 完整流程：测试 → swag → npm build → 嵌入 → 编译
+.\build.ps1                  # 完整流程：测试 → swag → pnpm build → 嵌入 → 编译
 .\build.ps1 -SkipTests       # 跳过 go test
-.\build.ps1 -Version v1.0.0  # 注入版本号（harness version 可查看）
+.\build.ps1 -Version v1.0.0  # 注入版本号（harness version 与启动横幅可见）
 ```
 
-产物为自包含的 `dist/`：`harness.exe + config/`，前端已嵌入二进制；`database/` 首次运行自动创建。
+产物为自包含的 `dist/`：`harness.exe + config/`，前端已嵌入 `harness.exe`；`database/` 首次运行自动创建。
+构建时会清理 `dist/` 下不再产出的旧二进制（如早期拆分出的 `api.exe`/`mq.exe`/`cron.exe`），避免误启动旧版本。
 
 ## 常见问题
 

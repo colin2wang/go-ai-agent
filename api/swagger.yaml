@@ -5,6 +5,12 @@ definitions:
         type: string
       max_history:
         type: integer
+      max_image_mb:
+        description: 单张图片体积上限 MB
+        type: integer
+      max_images:
+        description: 单条消息最多附带图片数（仅视觉模型）
+        type: integer
       stream_default:
         type: boolean
     type: object
@@ -91,10 +97,23 @@ definitions:
         example: error message
         type: string
     type: object
+  api.chatImage:
+    properties:
+      data:
+        type: string
+      mime:
+        type: string
+      name:
+        type: string
+    type: object
   api.chatMessage:
     properties:
       content:
         type: string
+      images:
+        items:
+          $ref: '#/definitions/api.chatImage'
+        type: array
       role:
         type: string
     type: object
@@ -128,7 +147,8 @@ paths:
       consumes:
       - application/json
       description: 将消息列表转发到所选 provider 的 chat/completions；默认以 SSE 逐块下发（事件 meta/delta/done/error），端点不支持流式时自动降级为一次性
-        JSON（附 stream_fallback/note），stream=false 时直接一次性 JSON 返回
+        JSON（附 stream_fallback/note），stream=false 时直接一次性 JSON 返回。messages[].images
+        可附带图片（base64，仅视觉模型与 user 消息）
       parameters:
       - description: 对话请求
         in: body

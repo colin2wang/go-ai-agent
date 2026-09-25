@@ -1,0 +1,10 @@
+# Build-script approval list for pnpm (pnpm >= 10 refuses to run postinstall
+# scripts of dependencies unless they are listed here; an unapproved script
+# makes `pnpm install` abort with ERR_PNPM_IGNORED_BUILDS and break build.ps1).
+#
+# esbuild is the only dependency that needs an install script: it picks/links
+# the platform binary used by vite. Approve it explicitly below.
+# When pnpm prints a new "Ignored build scripts: <pkg>" message, add that
+# package here (true = trusted) instead of running `pnpm approve-builds` by hand.
+allowBuilds:
+  esbuild: true

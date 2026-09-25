@@ -52,6 +52,10 @@ export interface FeatureChat {
   default_provider: string
   stream_default: boolean
   max_history: number
+  /** 单条消息最多附带的图片数（仅视觉模型）。 */
+  max_images: number
+  /** 单张图片体积上限 MB。 */
+  max_image_mb: number
 }
 
 /** AI 端点描述（不含 api-key）。 */
@@ -166,12 +170,21 @@ export interface ApiError {
 
 // ===== 对话（AI Chat）=====
 
+/** 消息附带的图片（视觉模型输入）；data 为不含 "data:image/png;base64," 前缀的纯 base64。 */
+export interface ChatImage {
+  name: string
+  mime: string
+  data: string
+}
+
 /** 一条对话消息。 */
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   /** 思考链（流式 Reasoning 增量累积，可选展示）。 */
   reasoning?: string
+  /** 随消息附带的图片（仅 user）；刷新恢复后 data 为空（不再上报，也不显示缩略图）。 */
+  images?: ChatImage[]
   streaming?: boolean
   error?: string
   meta?: string
@@ -182,7 +195,7 @@ export interface ChatSendRequest {
   feature_id: string
   provider: string
   model: string
-  messages: { role: string; content: string }[]
+  messages: { role: string; content: string; images?: ChatImage[] }[]
   stream?: boolean
 }
 

@@ -108,14 +108,18 @@ func (f *Factory) HTTPClient(p config.Provider) *http.Client {
 	}
 }
 
-// LogChat 对话直连路径的 io-log 埋点：复用注入的钩子记录输入与输出。
+// LogChat 对话直连路径的 io-log 埋点：复用注入的钩子记录输入与输出（同一 request_id 配对）。
 func (f *Factory) LogChat(provider, model string, messages []llms.MessageContent, answer, reasoning string, err error, latencyMs int64) {
 	h := f.ioLog
 	if h == nil {
 		return
 	}
+	id := ""
+	if h.NewID != nil {
+		id = h.NewID()
+	}
 	if h.OnRequest != nil {
-		h.OnRequest(provider, model, messages)
+		h.OnRequest(id, provider, model, messages)
 	}
 	if h.OnResponse == nil {
 		return
@@ -124,5 +128,5 @@ func (f *Factory) LogChat(provider, model string, messages []llms.MessageContent
 	if err == nil {
 		resp.Choices = []*llms.ContentChoice{{Content: answer, ReasoningContent: reasoning}}
 	}
-	h.OnResponse(provider, model, resp, err, int(latencyMs))
+	h.OnResponse(id, provider, model, resp, err, int(latencyMs))
 }
