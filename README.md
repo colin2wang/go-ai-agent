@@ -2,11 +2,11 @@
 
 基于 LLM 的通用 AI 工作流平台：以 **可编排的多步骤 LLM 流水线** 为核心，将文档理解、翻译、审读、分析等能力组合成 DAG 工作流，提供 REST API 与开箱即用的 Web UI。
 
-**工资单审读（OCR → 翻译 → 审读 → 专家分析 → 汇总）与图书目录识别（多页 OCR → 跨页合并 → 模板渲染）是平台内置的两个业务场景**；新场景只需「提示词 + 步骤配置 + 模板」即可接入，无需改动编排层。
+**工资单审读（OCR → 翻译 → 审读 → 专家分析 → 汇总）、图书目录识别（多页 OCR → 跨页合并 → 模板渲染）与 AI 对话（选端点/选模型/流式回复）是平台内置的三个业务场景**；新场景只需「提示词 + 步骤配置 + 模板」即可接入，无需改动编排层。
 
 - **后端**：Go + langchaingo（LLM 调用，OpenAI 兼容协议）+ langgraphgo（工作流编排）+ SQLite（调用统计）
 - **API**：REST + OpenAPI 文档（swaggo，`/swagger/index.html`）
-- **前端**：Vue3 + TypeScript + Vite（左侧主菜单 + 子功能 + 概览仪表盘），构建产物经 `go:embed` 打进单个二进制
+- **前端**：Vue3 + TypeScript + Vite（左侧主菜单 + 子功能 + 对话 + 概览仪表盘），构建产物经 `go:embed` 打进单个二进制
 - **配置**：三层分离 —— `config.yml`（总配置）/ `ai.yml`（AI provider）/ `features/*.yml`（子功能）
 - **部署**：`dist\harness.exe` 双击即用——自动选端口、自动打开浏览器
 
@@ -24,6 +24,7 @@
 | 模板化输出 | 输出经类 FreeMarker 的模板渲染（`internal/tmpl`），内置模板随二进制打包，可用外部目录覆盖 |
 | 概览仪表盘 | 侧边栏菜单 + 概览页：调用量/Token/耗时/成功率指标卡、趋势图、模型用量、最近调用 |
 | 端点连通性 | 概览页加载时自动探测一次 AI 端点（`GET {base-url}/v1/models`），并支持逐端点/一键手动「测试」；无实时轮询 |
+| AI 对话 | 与工作流子功能同级（`kind: chat`）：选择任意 provider、拉取 OpenAI 兼容 `/v1/models` 模型列表、自动探测流式能力并默认 SSE 流式显示回复 |
 | 视觉（VLM）支持 | `BinaryPart` 多模态输入，任意 OpenAI 兼容视觉模型可直接使用 |
 | 思考模型兼容 | 流式接收 + REASONING/ANSWER 分道累积，思考链与回答分别落日志 |
 | 全链路可观测 | io-log 截断日志（UUID 关联输入输出）+ SQLite 调用统计（Token/耗时/成功率，保留期自动清理） |
@@ -78,7 +79,8 @@ config/
 ├── ai.yml                      # AI provider：端点列表 + 全局默认（由 config.yml 的 ai.config 引用）
 └── features/
     ├── payslip-ocr.yml         # 子功能①：工资单审读（工作流 + 各步骤 provider/model/提示词）
-    └── book-toc.yml            # 子功能②：图书目录识别（多页输入 + 模板输出）
+    ├── book-toc.yml            # 子功能②：图书目录识别（多页输入 + 模板输出）
+    └── chat.yml                # 子功能③：AI 对话（kind=chat，选端点/选模型/流式回复）
 ```
 
 | 文件 | 配置节 | 说明 |
@@ -94,6 +96,8 @@ config/
 | `ai.yml` | `llm.io-log` | 输入/输出截断日志（head-chars / tail-chars；多模态只记文件名与媒体类型） |
 | `ai.yml` | `llm.stream-output` | 统一流式接收（默认开启），关闭回退普通调用 |
 | `ai.yml` | `llm.reasoning-enabled` | 思考模式开关，各步骤可独立覆盖 |
+| `features/*.yml` | `kind` | 页面类型：`workflow`（默认，上传执行）/ `chat`（对话界面） |
+| `features/*.yml` | `chat` | 对话专属配置：default-provider / system-prompt / stream-default / max-history |
 | `features/*.yml` | `input` | 输入声明：kind / **multiple（多页上传）** / accept / hint，前端据此渲染上传控件 |
 | `features/*.yml` | `output` | 输出声明：template（模板名）/ template-dir（外部模板目录，留空用内置）/ extension（下载扩展名） |
 | `features/*.yml` | `workflow` | 编排类型 / 入口节点 / max-retries（条件边回退上限）/ pipeline（展示顺序） |
@@ -171,6 +175,18 @@ flowchart LR
 {{ end }}
 ```
 
+### 子功能三：AI 对话（`chat`）
+
+与工资单 OCR / 图书目录同级的可插拔子功能，`kind: chat` 时前端渲染对话界面而非上传执行页：
+
+1. **选择端点**：下拉框列出 `ai.yml` 声明的全部 provider，默认选中 `chat.default-provider`；
+2. **选择模型**：切换端点时后端代理 OpenAI 兼容接口 `GET {base-url}/v1/models` 拉取模型列表（可手动刷新重拉）；
+3. **流式回复**：选定模型后自动探测端点是否支持流式（发一条 `stream=true` 的最小请求按 SSE 首帧判定），
+   支持则默认流式显示（`event: meta/delta/done` SSE 透传，思考增量单独展示），不支持则自动回退普通一次性返回。
+
+多轮历史由前端维护并持久化（localStorage），发送时按 `chat.max-history` 裁剪；对话调用同样进 io-log 与 SQLite 统计。
+相关接口：`GET /api/providers/models`、`GET /api/providers/stream-check`、`POST /api/chat/send`。
+
 ## 架构
 
 ### 分层架构图
@@ -183,7 +199,7 @@ flowchart TB
     end
 
     subgraph APPL["API 层 · internal/api"]
-        HANDLERS["handlers.go<br/>GET /api/features · GET /api/overview · POST /api/providers/check<br/>POST /api/features/:id/run · GET /api/jobs/:id"]
+        HANDLERS["handlers.go<br/>GET /api/features · GET /api/overview · POST /api/providers/check<br/>GET /api/providers/models · POST /api/chat/send（SSE）<br/>POST /api/features/:id/run · GET /api/jobs/:id"]
         SRV["Server<br/>子功能注册表 pipelines · 任务缓存 jobs"]
     end
 
@@ -555,13 +571,13 @@ classDiagram
 ├── frontend/             # Vue3 + TS + Vite
 │   └── src/
 │       ├── components/   # Sidebar / MetricCard / Sparkline / TrendChart / AppIcon
-│       ├── views/        # OverviewView（概览仪表盘）/ FeatureView（子功能执行页）
+│       ├── views/        # OverviewView（概览仪表盘）/ FeatureView（子功能执行页）/ ChatView（对话）
 │       ├── api.ts        # REST 封装     types.ts  # 接口类型     chart.ts  # 图表计算
 │       └── styles.css    # 全局主题（浅色卡片式，绿/蓝/紫/橙强调色）
 ├── config/
 │   ├── config.yml        # 总配置（入口）
 │   ├── ai.yml            # AI provider 端点
-│   └── features/         # 各子功能配置（payslip-ocr.yml）
+│   └── features/         # 各子功能配置（payslip-ocr.yml / book-toc.yml / chat.yml）
 └── build.ps1             # 一键构建（swag → npm → go → dist/）
 ```
 
@@ -572,6 +588,9 @@ classDiagram
 | GET | `/api/features` | 子功能清单（前端左侧菜单 + 流程链）+ provider 列表 |
 | GET | `/api/overview?days=14` | 概览指标：总量/今日/耗时/成功率/按天趋势/模型用量/最近调用 |
 | POST | `/api/providers/check` | 测试 AI 端点连通性；body `{"provider":"name"}` 只测指定端点，省略则并发测试全部端点 |
+| GET | `/api/providers/models?provider=` | 代理 OpenAI 兼容 `GET /v1/models` 拉取模型列表（对话子功能选模型用） |
+| GET | `/api/providers/stream-check?provider=&model=` | 探测指定端点+模型是否支持流式（SSE）返回 |
+| POST | `/api/chat/send` | 发送对话消息：默认 SSE 流式下发（事件 `meta`/`delta`/`done`/`error`），`stream:false` 时一次性 JSON 返回 |
 | POST | `/api/features/{id}/run` | multipart 上传并执行子功能工作流：单文件用 `file` 字段，多页用 `files` 字段（可多个，按上传顺序处理） |
 | POST | `/api/payslip/review` | 工资单场景快捷入口（等价于 `features/payslip-ocr/run`） |
 | GET | `/api/jobs/{id}` | 按任务 ID 查询结果（预留异步扩展） |

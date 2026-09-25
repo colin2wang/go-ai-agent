@@ -59,8 +59,10 @@ if (Test-Path (Join-Path $PSScriptRoot "frontend")) {
     # the binary by `//go:embed all:webdist` (see internal/api/static.go).
     $feDist = Join-Path $PSScriptRoot "frontend/dist"
     $embedDir = Join-Path $PSScriptRoot "internal/api/webdist"
-    # Clear previous assets but keep index.html so the embed dir is never empty.
-    Remove-Item (Join-Path $embedDir "*") -Recurse -Force -Exclude index.html
+    # Clear previous assets but keep index.html so the embed dir is never empty
+    # (go:embed fails to compile when the pattern matches no files).
+    New-Item -ItemType Directory -Force -Path $embedDir | Out-Null
+    Get-ChildItem -Force -Path $embedDir -Exclude index.html | Remove-Item -Recurse -Force
     Copy-Item (Join-Path $feDist "*") -Destination $embedDir -Recurse -Force
     Write-Host "==> embedded frontend/dist -> internal/api/webdist" -ForegroundColor Cyan
 }

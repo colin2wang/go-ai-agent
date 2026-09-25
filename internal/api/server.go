@@ -65,10 +65,12 @@ type FeatureInfo struct {
 	Description string        `json:"description"`
 	Icon        string        `json:"icon"`
 	Order       int           `json:"order"`
+	Kind        string        `json:"kind"` // workflow（默认，上传执行）| chat（对话）
 	Pipeline    []string      `json:"pipeline"`
 	Steps       []string      `json:"steps"`
 	Input       FeatureInput  `json:"input"`
 	Output      FeatureOutput `json:"output"`
+	Chat        FeatureChat   `json:"chat"`
 }
 
 // FeatureInput 输入声明（前端据此渲染上传控件）。
@@ -84,6 +86,13 @@ type FeatureOutput struct {
 	Template    string `json:"template"`
 	TemplateDir string `json:"template_dir"`
 	Extension   string `json:"extension"`
+}
+
+// FeatureChat 对话类子功能的前端可见配置（不含任何密钥）。
+type FeatureChat struct {
+	DefaultProvider string `json:"default_provider"`
+	StreamDefault   bool   `json:"stream_default"`
+	MaxHistory      int    `json:"max_history"`
 }
 
 // ProviderInfo AI 端点对外描述（不含 api-key）。
@@ -274,6 +283,7 @@ func (s *Server) featureInfos() []FeatureInfo {
 			Description: f.Description,
 			Icon:        f.Icon,
 			Order:       f.Order,
+			Kind:        orDefault(f.Kind, "workflow"),
 			Pipeline:    f.Workflow.Pipeline,
 			Steps:       steps,
 			Input: FeatureInput{
@@ -286,6 +296,11 @@ func (s *Server) featureInfos() []FeatureInfo {
 				Template:    orDefault(f.Output.Template, "markdown"),
 				TemplateDir: f.Output.TemplateDir,
 				Extension:   orDefault(f.Output.Extension, ".md"),
+			},
+			Chat: FeatureChat{
+				DefaultProvider: orDefault(f.Chat.DefaultProvider, s.cfg.LLM.DefaultProvider),
+				StreamDefault:   s.chatStreamDefault(f),
+				MaxHistory:      f.Chat.MaxHistory,
 			},
 		})
 	}

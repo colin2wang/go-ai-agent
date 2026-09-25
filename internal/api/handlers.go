@@ -26,6 +26,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/features", s.handleFeatures)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("POST /api/providers/check", s.handleProviderCheck)
+	mux.HandleFunc("GET /api/providers/models", s.handleChatModels)            // 对话：模型列表
+	mux.HandleFunc("GET /api/providers/stream-check", s.handleChatStreamCheck) // 对话：流式能力探测
+	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)                    // 对话：SSE 流式回复
 	mux.HandleFunc("POST /api/features/{id}/run", s.handleRunFeature)
 	mux.HandleFunc("POST /api/payslip/review", s.handlePayslipReview) // 工资单场景快捷入口
 	mux.HandleFunc("GET /api/jobs/{id}", s.handleJob)
@@ -159,6 +162,10 @@ func (s *Server) handleRunFeature(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := s.pipelines[id]; !ok {
 		fail(w, http.StatusNotFound, "子功能未启用或不存在: "+id)
+		return
+	}
+	if f, ok := s.cfg.Feature(id); ok && f.IsChat() {
+		fail(w, http.StatusBadRequest, "对话类子功能不支持上传执行，请使用 /api/chat/send")
 		return
 	}
 	s.runFeature(w, r, id)

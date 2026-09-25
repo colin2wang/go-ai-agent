@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import Sidebar from './components/Sidebar.vue'
 import OverviewView from './views/OverviewView.vue'
 import FeatureView from './views/FeatureView.vue'
+import ChatView from './views/ChatView.vue'
 import { fetchFeatures, fetchOverview, health } from './api'
 import type { AppInfo, FeatureInfo, OverviewResponse, ProviderInfo } from './types'
 
@@ -86,6 +87,13 @@ onMounted(boot)
           :providers="providers"
           :days="days"
           @reload="onReload"
+        />
+        <ChatView
+          v-else-if="activeFeature?.kind === 'chat'"
+          :key="activeFeature.id"
+          :feature="activeFeature"
+          :providers="providers"
+          @done="loadOverview"
         />
         <FeatureView
           v-else-if="activeFeature"

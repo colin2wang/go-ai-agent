@@ -1,6 +1,17 @@
 definitions:
+  api.FeatureChat:
+    properties:
+      default_provider:
+        type: string
+      max_history:
+        type: integer
+      stream_default:
+        type: boolean
+    type: object
   api.FeatureInfo:
     properties:
+      chat:
+        $ref: '#/definitions/api.FeatureChat'
       description:
         type: string
       icon:
@@ -9,6 +20,9 @@ definitions:
         type: string
       input:
         $ref: '#/definitions/api.FeatureInput'
+      kind:
+        description: workflow（默认，上传执行）| chat（对话）
+        type: string
       name:
         type: string
       order:
@@ -77,9 +91,70 @@ definitions:
         example: error message
         type: string
     type: object
+  api.chatMessage:
+    properties:
+      content:
+        type: string
+      role:
+        type: string
+    type: object
+  api.chatSendRequest:
+    properties:
+      feature_id:
+        type: string
+      max_tokens:
+        description: nil/0 = 步骤配置
+        type: integer
+      messages:
+        items:
+          $ref: '#/definitions/api.chatMessage'
+        type: array
+      model:
+        type: string
+      provider:
+        type: string
+      stream:
+        description: nil = 跟随子功能/全局默认
+        type: boolean
+      temperature:
+        description: nil = 步骤配置
+        type: number
+    type: object
 info:
   contact: {}
 paths:
+  /api/chat/send:
+    post:
+      consumes:
+      - application/json
+      description: 将消息列表转发到所选 provider 的 chat/completions；默认以 SSE 逐块下发（事件 meta/delta/done/error），端点不支持流式时自动降级为一次性
+        JSON（附 stream_fallback/note），stream=false 时直接一次性 JSON 返回
+      parameters:
+      - description: 对话请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.chatSendRequest'
+      produces:
+      - application/json
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE 事件流或完整响应
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.apiError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.apiError'
+      summary: 发送对话消息（SSE 流式）
+      tags:
+      - chat
   /api/features:
     get:
       description: 返回已启用的子功能（前端左侧菜单与流程链展示）
@@ -239,4 +314,63 @@ paths:
       summary: 测试 AI 端点连通性
       tags:
       - providers
+  /api/providers/models:
+    get:
+      description: '代理 OpenAI 兼容端点 GET {base-url}/v1/models，附视觉/推理能力粗判，供对话子功能选择模型（query:
+        provider）'
+      parameters:
+      - description: provider 名（ai.yml 中声明）
+        in: query
+        name: provider
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: provider / base_url / models[]（chatModelInfo）
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.apiError'
+        "502":
+          description: Bad Gateway
+          schema:
+            $ref: '#/definitions/api.apiError'
+      summary: 拉取 provider 的模型列表
+      tags:
+      - chat
+  /api/providers/stream-check:
+    get:
+      description: '向 chat/completions 发一条最小流式请求（max_tokens=1），按 SSE 首帧判断端点是否支持流式（query:
+        provider、model）'
+      parameters:
+      - description: provider 名
+        in: query
+        name: provider
+        required: true
+        type: string
+      - description: 模型名
+        in: query
+        name: model
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: provider / model / stream_supported / detail / latency_ms
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.apiError'
+      summary: 探测 provider 是否支持流式返回
+      tags:
+      - chat
 swagger: "2.0"

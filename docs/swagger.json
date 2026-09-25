@@ -4,6 +4,53 @@
         "contact": {}
     },
     "paths": {
+        "/api/chat/send": {
+            "post": {
+                "description": "将消息列表转发到所选 provider 的 chat/completions；默认以 SSE 逐块下发（事件 meta/delta/done/error），端点不支持流式时自动降级为一次性 JSON（附 stream_fallback/note），stream=false 时直接一次性 JSON 返回",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json",
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "发送对话消息（SSE 流式）",
+                "parameters": [
+                    {
+                        "description": "对话请求",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.chatSendRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "SSE 事件流或完整响应",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiError"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiError"
+                        }
+                    }
+                }
+            }
+        },
         "/api/features": {
             "get": {
                 "description": "返回已启用的子功能（前端左侧菜单与流程链展示）",
@@ -240,12 +287,114 @@
                     }
                 }
             }
+        },
+        "/api/providers/models": {
+            "get": {
+                "description": "代理 OpenAI 兼容端点 GET {base-url}/v1/models，附视觉/推理能力粗判，供对话子功能选择模型（query: provider）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "拉取 provider 的模型列表",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "provider 名（ai.yml 中声明）",
+                        "name": "provider",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "provider / base_url / models[]（chatModelInfo）",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiError"
+                        }
+                    },
+                    "502": {
+                        "description": "Bad Gateway",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/providers/stream-check": {
+            "get": {
+                "description": "向 chat/completions 发一条最小流式请求（max_tokens=1），按 SSE 首帧判断端点是否支持流式（query: provider、model）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "探测 provider 是否支持流式返回",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "provider 名",
+                        "name": "provider",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "模型名",
+                        "name": "model",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "provider / model / stream_supported / detail / latency_ms",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiError"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
+        "api.FeatureChat": {
+            "type": "object",
+            "properties": {
+                "default_provider": {
+                    "type": "string"
+                },
+                "max_history": {
+                    "type": "integer"
+                },
+                "stream_default": {
+                    "type": "boolean"
+                }
+            }
+        },
         "api.FeatureInfo": {
             "type": "object",
             "properties": {
+                "chat": {
+                    "$ref": "#/definitions/api.FeatureChat"
+                },
                 "description": {
                     "type": "string"
                 },
@@ -257,6 +406,10 @@
                 },
                 "input": {
                     "$ref": "#/definitions/api.FeatureInput"
+                },
+                "kind": {
+                    "description": "workflow（默认，上传执行）| chat（对话）",
+                    "type": "string"
                 },
                 "name": {
                     "type": "string"
@@ -358,6 +511,49 @@
                 "error": {
                     "type": "string",
                     "example": "error message"
+                }
+            }
+        },
+        "api.chatMessage": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.chatSendRequest": {
+            "type": "object",
+            "properties": {
+                "feature_id": {
+                    "type": "string"
+                },
+                "max_tokens": {
+                    "description": "nil/0 = 步骤配置",
+                    "type": "integer"
+                },
+                "messages": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.chatMessage"
+                    }
+                },
+                "model": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "stream": {
+                    "description": "nil = 跟随子功能/全局默认",
+                    "type": "boolean"
+                },
+                "temperature": {
+                    "description": "nil = 步骤配置",
+                    "type": "number"
                 }
             }
         }

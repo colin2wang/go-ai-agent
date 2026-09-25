@@ -44,7 +44,7 @@ steps:
     prompt-template: toc-ocr-default
     temperature: 0.1
     max-tokens: 8192
-    reasoning-enabled: false、
+    reasoning-enabled: false
 
   # 跨页合并：去重、修正层级、按页码排序
   merge:

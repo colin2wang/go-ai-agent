@@ -81,18 +81,38 @@ type Feature struct {
 	Description string          `yaml:"description"`
 	Icon        string          `yaml:"icon"`
 	Order       int             `yaml:"order"`
+	Kind        string          `yaml:"kind"` // 页面类型：workflow（默认，上传执行）| chat（对话）
 	Input       Input           `yaml:"input"`
 	Output      Output          `yaml:"output"`
 	Workflow    Workflow        `yaml:"workflow"`
 	Steps       map[string]Step `yaml:"steps"`
+	Chat        Chat            `yaml:"chat"`
 }
+
+// IsChat 对话类子功能（前端渲染聊天界面而非上传执行页）。
+func (f Feature) IsChat() bool { return f.Kind == "chat" }
 
 // Input 子功能的输入声明（前端据此渲染上传控件）。
 type Input struct {
-	Kind     string `yaml:"kind"`     // image | file
+	Kind     string `yaml:"kind"`     // image | file | text
 	Multiple bool   `yaml:"multiple"` // 是否支持多文件（如多页扫描件）
 	Accept   string `yaml:"accept"`   // input[accept]
 	Hint     string `yaml:"hint"`     // 上传区提示文案
+}
+
+// Chat 对话类子功能的专属配置。
+type Chat struct {
+	DefaultProvider string `yaml:"default-provider"` // 缺省 provider（留空回退 ai.yml default-provider）
+	SystemPrompt    string `yaml:"system-prompt"`    // 系统提示词
+	StreamDefault   *bool  `yaml:"stream-default"`   // 默认是否流式（nil = 跟随全局 stream-output）
+	MaxHistory      int    `yaml:"max-history"`      // 发送给模型的历史消息条数上限（0 = 不限制）
+	ReasoningEffort string `yaml:"reasoning-effort"` // 思考力度：none/minimal/low/medium/high/xhigh（空 = 不发送，跟随端点默认）
+}
+
+// validReasoningEffort chat.reasoning-effort 的合法取值（OpenAI 兼容协议，LM Studio 同样接受）。
+var validReasoningEffort = map[string]bool{
+	"none": true, "minimal": true, "low": true,
+	"medium": true, "high": true, "xhigh": true,
 }
 
 // Output 子功能的输出声明（模板渲染，用法类似 FreeMarker）。
@@ -351,8 +371,17 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config.features: 子功能 %q 重复注册", f.ID)
 		}
 		seen[f.ID] = true
+		// 对话类子功能也必须声明一个 chat 步骤（承载默认 provider/model/参数）
 		if len(f.Steps) == 0 {
 			return fmt.Errorf("features.%s: 未配置任何 steps", f.ID)
+		}
+		if f.IsChat() {
+			if f.Chat.DefaultProvider != "" && !names[f.Chat.DefaultProvider] {
+				return fmt.Errorf("features.%s.chat.default-provider %q 未声明", f.ID, f.Chat.DefaultProvider)
+			}
+			if f.Chat.ReasoningEffort != "" && !validReasoningEffort[f.Chat.ReasoningEffort] {
+				return fmt.Errorf("features.%s.chat.reasoning-effort %q 无效（支持 none/minimal/low/medium/high/xhigh，留空则不发送）", f.ID, f.Chat.ReasoningEffort)
+			}
 		}
 		for name, st := range f.Steps {
 			if st.Model == "" {

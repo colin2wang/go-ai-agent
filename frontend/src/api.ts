@@ -1,9 +1,14 @@
 import type {
+  ChatCollectResponse,
+  ChatDoneEvent,
+  ChatSendRequest,
+  ChatStreamHandlers,
   FeaturesResponse,
   JobResult,
   OverviewResponse,
   ProviderCheck,
   ProviderCheckResponse,
+  ProviderModels,
 } from './types'
 
 async function getJSON<T>(url: string): Promise<T> {
@@ -78,4 +83,83 @@ export async function health(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// ===== 对话（AI Chat）=====
+
+/** 拉取指定 provider 的模型列表（后端代理 OpenAI 兼容 GET /v1/models）。 */
+export async function fetchProviderModels(provider: string): Promise<ProviderModels> {
+  const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(provider)}`)
+  const data: unknown = await res.json()
+  if (!res.ok) {
+    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
+  }
+  return data as ProviderModels
+}
+
+/**
+ * 发送对话消息。stream=true 时解析 SSE 事件（meta/delta/done）分发回调；
+ * 端点不支持流式时后端自动降级，此时按一次性 JSON 返回 ChatCollectResponse（stream_fallback/note）。
+ * signal 支持中途停止生成。
+ */
+export async function sendChat(
+  req: ChatSendRequest,
+  handlers: ChatStreamHandlers,
+  signal?: AbortSignal,
+): Promise<ChatCollectResponse | null> {
+  const res = await fetch('/api/chat/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+    signal,
+  })
+  const ctype = res.headers.get('content-type') ?? ''
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const data: unknown = await res.json()
+      msg = (data as { error?: string }).error ?? msg
+    } catch {
+      /* 忽略非 JSON 错误体 */
+    }
+    throw new Error(msg)
+  }
+  if (!ctype.includes('text/event-stream')) {
+    return (await res.json()) as ChatCollectResponse
+  }
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('浏览器不支持流式读取')
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    // SSE 事件以空行分隔；data 为单行 JSON
+    for (;;) {
+      const idx = buf.indexOf('\n\n')
+      if (idx < 0) break
+      const rawEvent = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      let event = ''
+      const dataLines: string[] = []
+      for (const line of rawEvent.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim()
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+      }
+      if (!event || !dataLines.length) continue
+      let payload: unknown
+      try {
+        payload = JSON.parse(dataLines.join('\n'))
+      } catch {
+        continue
+      }
+      if (event === 'meta') handlers.onMeta?.(payload as { provider: string; model: string })
+      else if (event === 'delta') handlers.onDelta?.(payload as { type: 'answer' | 'reasoning'; text: string })
+      else if (event === 'done') handlers.onDone?.(payload as ChatDoneEvent)
+      else if (event === 'error') throw new Error((payload as { error?: string }).error ?? '生成失败')
+    }
+  }
+  return null
 }

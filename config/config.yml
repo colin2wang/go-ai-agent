@@ -50,3 +50,7 @@ features:
   - id: book-toc
     enabled: true
     config: features/book-toc.yml
+
+  - id: chat
+    enabled: true
+    config: features/chat.yml

@@ -85,3 +85,44 @@ func (f *Factory) build(p config.Provider, model string) (*openai.LLM, error) {
 		openai.WithHTTPClient(httpClient),
 	)
 }
+
+// Provider 返回 provider 原始配置（含 api-key，仅限服务端内部使用）。
+func (f *Factory) Provider(name string) (config.Provider, bool) {
+	p, ok := f.providers[name]
+	return p, ok
+}
+
+// HTTPClient 按 provider 的超时配置构造 HTTP 客户端（直连 OpenAI 兼容端点时使用）。
+func (f *Factory) HTTPClient(p config.Provider) *http.Client {
+	timeout := time.Duration(p.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 600 * time.Second
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: time.Duration(p.ConnectTimeoutSeconds) * time.Second,
+			}).DialContext,
+		},
+	}
+}
+
+// LogChat 对话直连路径的 io-log 埋点：复用注入的钩子记录输入与输出。
+func (f *Factory) LogChat(provider, model string, messages []llms.MessageContent, answer, reasoning string, err error, latencyMs int64) {
+	h := f.ioLog
+	if h == nil {
+		return
+	}
+	if h.OnRequest != nil {
+		h.OnRequest(provider, model, messages)
+	}
+	if h.OnResponse == nil {
+		return
+	}
+	resp := &llms.ContentResponse{}
+	if err == nil {
+		resp.Choices = []*llms.ContentChoice{{Content: answer, ReasoningContent: reasoning}}
+	}
+	h.OnResponse(provider, model, resp, err, int(latencyMs))
+}

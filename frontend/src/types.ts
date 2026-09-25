@@ -37,11 +37,21 @@ export interface FeatureInfo {
   description: string
   icon: string
   order: number
+  /** 页面类型：workflow（上传执行）| chat（对话）。 */
+  kind: string
   /** 工作流节点顺序（展示用）。 */
   pipeline: string[]
   steps: string[]
   input: FeatureInput
   output: FeatureOutput
+  chat: FeatureChat
+}
+
+/** 对话子功能配置（GET /api/features 的 chat 字段）。 */
+export interface FeatureChat {
+  default_provider: string
+  stream_default: boolean
+  max_history: number
 }
 
 /** AI 端点描述（不含 api-key）。 */
@@ -152,4 +162,78 @@ export interface JobResult {
 
 export interface ApiError {
   error: string
+}
+
+// ===== 对话（AI Chat）=====
+
+/** 一条对话消息。 */
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  /** 思考链（流式 Reasoning 增量累积，可选展示）。 */
+  reasoning?: string
+  streaming?: boolean
+  error?: string
+  meta?: string
+}
+
+/** 一次对话请求体（POST /api/chat/send）。 */
+export interface ChatSendRequest {
+  feature_id: string
+  provider: string
+  model: string
+  messages: { role: string; content: string }[]
+  stream?: boolean
+}
+
+/** 模型列表中的单个模型（后端元数据 + 名称启发粗判）。 */
+export interface ModelInfo {
+  id: string
+  vision: boolean
+  reasoning: boolean
+}
+
+/** provider 模型列表（GET /api/providers/models）。 */
+export interface ProviderModels {
+  provider: string
+  base_url: string
+  models: ModelInfo[]
+  fetched_at: string
+}
+
+/** 流式能力探测结果（GET /api/providers/stream-check）。 */
+export interface StreamCheck {
+  provider: string
+  model: string
+  stream_supported: boolean
+  detail: string
+  latency_ms: number
+  checked_at: string
+}
+
+/** done 事件负载。 */
+export interface ChatDoneEvent {
+  duration_ms: number
+  prompt_tokens: number
+  completion_tokens: number
+}
+
+/** SSE 事件回调（sendChat 解析后分发）。 */
+export interface ChatStreamHandlers {
+  onMeta?: (meta: { provider: string; model: string }) => void
+  onDelta?: (delta: { type: 'answer' | 'reasoning'; text: string }) => void
+  onDone?: (done: ChatDoneEvent) => void
+}
+
+/** 非流式完整响应（POST /api/chat/send）；请求了流式但端点不支持时，后端自动降级并携带 stream_fallback/note。 */
+export interface ChatCollectResponse {
+  provider: string
+  model: string
+  answer: string
+  reasoning: string
+  prompt_tokens: number
+  completion_tokens: number
+  duration_ms?: number
+  stream_fallback?: boolean
+  note?: string
 }

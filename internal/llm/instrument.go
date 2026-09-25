@@ -60,6 +60,15 @@ func (s *StatsSink) record(e statEntry) {
 	}
 }
 
+// RecordChat 对话直连路径的统计埋点：异步上报一次调用（队列满即丢弃）。
+func (f *Factory) RecordChat(provider, model string, promptTokens, completionTokens int, latencyMs int64, err error) {
+	f.stats.record(statEntry{
+		provider: provider, model: model,
+		promptTokens: promptTokens, completionTokens: completionTokens,
+		latencyMs: int(latencyMs), ok: err == nil, errMsg: errString(err),
+	})
+}
+
 // IoLogHook 输入/输出日志钩子（由 iolog 包注入实现，避免包循环）。
 type IoLogHook struct {
 	OnRequest  func(provider, model string, messages []llms.MessageContent)

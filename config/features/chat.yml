@@ -1,0 +1,52 @@
+# ============================================================================
+# 子功能：AI 对话（Chat）
+# ----------------------------------------------------------------------------
+# 与工资单 OCR / 图书目录同级的可插拔子功能，但页面形态不同：
+# kind=chat 时前端渲染对话界面而非上传执行页，走 /api/chat/send（SSE 流式）。
+#
+# 能力：
+#   1. 可选择 ai.yml 声明的任意 provider（前端下拉框）；
+#   2. 通过 OpenAI 兼容接口 GET /v1/models 拉取模型列表并选择；
+#   3. 默认流式显示回复（前端可选择模型后自动探测端点是否支持流式）。
+# ============================================================================
+id: chat
+name: AI 对话
+description: 选择端点与模型进行多轮对话，默认流式显示回复（自动探测端点流式能力）
+icon: chat
+order: 3
+kind: chat
+
+# ---- 输入声明（kind=chat 时前端渲染对话输入框）----
+input:
+  kind: text
+  hint: Enter 发送，Shift+Enter 换行
+
+# ---- 对话专属配置 ----
+chat:
+  default-provider: lmstudio-local   # 打开页面时默认选中的端点
+  system-prompt: |
+    你是一个乐于助人的 AI 助手。请使用用户提问的语言回答，回答准确、简洁，
+    代码与命令使用 Markdown 代码块表示。
+  stream-default: true               # 默认流式显示回复（探测到端点不支持时自动关闭）
+  max-history: 20                    # 发送给模型的历史消息条数上限（0 = 不限制）
+  # 思考力度（OpenAI 兼容 reasoning_effort 参数），思考增量单独流式展示，
+  # 避免深度思考时用户长时间白屏等待：
+  #   留空 = 不发送该参数，跟随端点自身设置；
+  #   可发送值：none / minimal / low / medium / high / xhigh（部分端点如 Ollama 不认此字段，需留空）。
+  reasoning-effort: medium
+
+# ---- 步骤配置：chat 步骤承载默认模型与生成参数 ----
+# 实际对话时 provider/model 由前端选择覆盖；model 为未选择时的兜底。
+steps:
+  chat:
+    provider: lmstudio-local
+    model: qwen3-vl-8b
+    temperature: 0.7
+    max-tokens: 4096
+
+# ---- 工作流声明（对话无编排流程，仅供概览页流程链展示占位）----
+workflow:
+  type: chat
+  entry: chat
+  pipeline:
+    - chat
