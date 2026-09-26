@@ -160,6 +160,7 @@ type IoLog struct {
 	Enabled   bool `yaml:"enabled"`
 	HeadChars int  `yaml:"head-chars"`
 	TailChars int  `yaml:"tail-chars"`
+	Debug     bool `yaml:"debug"` // 调试模式：完整输出输入文本与模型原始输出（不截断、不折叠）
 }
 
 // Provider 一个连接端点声明。

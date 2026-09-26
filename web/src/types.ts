@@ -224,6 +224,23 @@ export interface StreamCheck {
   checked_at: string
 }
 
+/** 模型能力探测结果（GET /api/providers/caps，后端按 provider+model 缓存）。 */
+export interface ModelCaps {
+  provider: string
+  model: string
+  vision: boolean
+  reasoning: boolean
+  stream: boolean
+  stream_note?: string
+  /** 视觉/推理是否经过真实接口调用验证（false = 启发式兜底结论）。 */
+  probed_vlm: boolean
+  probed_json: boolean
+  heuristic_ok: boolean
+  probed_at: string
+  /** true = 命中后端缓存，未重新探测。 */
+  cached: boolean
+}
+
 /** done 事件负载。 */
 export interface ChatDoneEvent {
   duration_ms: number

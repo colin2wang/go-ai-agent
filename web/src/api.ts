@@ -9,6 +9,7 @@ import type {
   ProviderCheck,
   ProviderCheckResponse,
   ProviderModels,
+  ModelCaps,
 } from './types'
 
 async function getJSON<T>(url: string): Promise<T> {
@@ -95,6 +96,18 @@ export async function fetchProviderModels(provider: string): Promise<ProviderMod
     throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
   }
   return data as ProviderModels
+}
+
+/** 探测指定模型的能力（后端缓存，模型不变时直接返回缓存结果）。 */
+export async function fetchModelCaps(provider: string, model: string): Promise<ModelCaps> {
+  const res = await fetch(
+    `/api/providers/caps?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
+  )
+  const data: unknown = await res.json()
+  if (!res.ok) {
+    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
+  }
+  return data as ModelCaps
 }
 
 /**

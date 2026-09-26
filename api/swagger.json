@@ -264,6 +264,55 @@
                 }
             }
         },
+        "/api/providers/caps": {
+            "get": {
+                "description": "对指定 provider+model 真实调用接口检测视觉/推理/流式能力并缓存；模型不变时直接返回缓存结果（query: provider、model、force=1 跳过缓存强制重测）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "探测并缓存模型能力",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "provider 名",
+                        "name": "provider",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "模型名",
+                        "name": "model",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "force=1 强制重新探测",
+                        "name": "force",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "provider / model / vision / reasoning / stream / cached / probed_at",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiError"
+                        }
+                    }
+                }
+            }
+        },
         "/api/providers/check": {
             "post": {
                 "description": "对 ai.yml 声明的 provider 做一次连通性探测（GET {base-url}/v1/models）。\nbody: {\"provider\":\"name\"} 仅测指定端点，省略或为空则并发测试全部端点。\n由前端在概览页加载时调用一次、或用户手动点击「测试 / 全部测试」时调用，不做后台实时轮询。",

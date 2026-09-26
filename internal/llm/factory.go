@@ -27,7 +27,11 @@ type Factory struct {
 	providers map[string]config.Provider
 	stats     *StatsSink // 可为 nil
 	ioLog     *IoLogHook // 可为 nil
+	wireDump  bool       // HTTP 层抓包（io-log.debug 开启时置位）
 }
+
+// EnableWireDump 开启 HTTP 层请求/响应原文日志（排查端点交互问题时使用）。
+func (f *Factory) EnableWireDump() { f.wireDump = true }
 
 // NewFactory 创建工厂；stats/ioLog 可为 nil（未启用时）。
 // 启动期预热所有 provider：缺哪个立即报错，避免运行时 panic 难定位。
@@ -70,16 +74,20 @@ func (f *Factory) Get(providerName, model string) (Model, error) {
 }
 
 func (f *Factory) build(p config.Provider, model string) (*openai.LLM, error) {
+	transport := http.RoundTripper(&http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: time.Duration(p.ConnectTimeoutSeconds) * time.Second,
+		}).DialContext,
+	})
+	if f.wireDump {
+		transport = &wireDumpTransport{next: transport}
+	}
 	httpClient := &http.Client{
-		Timeout: time.Duration(p.TimeoutSeconds) * time.Second,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout: time.Duration(p.ConnectTimeoutSeconds) * time.Second,
-			}).DialContext,
-		},
+		Timeout:   time.Duration(p.TimeoutSeconds) * time.Second,
+		Transport: transport,
 	}
 	return openai.New(
-		openai.WithBaseURL(p.BaseURL), // langchaingo 自动追加 /v1，yml 中不要带
+		openai.WithBaseURL(p.BaseURL), // 注意：langchaingo 仅做 baseURL+"/chat/completions" 拼接，不会补 /v1，yml 中 base-url 须自带 /v1
 		openai.WithToken(p.APIKey),
 		openai.WithModel(model),
 		openai.WithHTTPClient(httpClient),

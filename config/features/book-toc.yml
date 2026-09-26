@@ -40,7 +40,7 @@ steps:
   # 逐页 OCR：单张目录页 → 条目 JSON
   ocr:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     prompt-template: toc-ocr-default
     temperature: 0.1
     max-tokens: 8192
@@ -49,7 +49,7 @@ steps:
   # 跨页合并：去重、修正层级、按页码排序
   merge:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     prompt-template: toc-merge-default
     temperature: 0.1
     max-tokens: 8192

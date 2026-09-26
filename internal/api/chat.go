@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
@@ -118,8 +119,49 @@ type chatUpstream struct {
 // chatModelInfo 模型列表中的单个模型（附视觉/推理能力粗判）。
 type chatModelInfo struct {
 	ID        string `json:"id"`
-	Vision    bool   `json:"vision"`    // 图像输入（视觉）
-	Reasoning bool   `json:"reasoning"` // 声明推理/思考能力
+	Vision    bool   `json:"vision"`
+	Reasoning bool   `json:"reasoning"`
+}
+
+// modelCaps 一次真实接口探测得到的能力结果（缓存值）。
+// 流式为端点级结论；视觉/推理优先真实调用，探测失败时回退元数据/名称启发。
+type modelCaps struct {
+	Vision      bool   `json:"vision"`
+	Reasoning   bool   `json:"reasoning"`
+	Stream      bool   `json:"stream"`
+	StreamNote  string `json:"stream_note,omitempty"` // 流式探测说明（失败原因等）
+	ProbedAt    string `json:"probed_at"`             // RFC3339，探测时间
+	ProbedVLM   bool   `json:"probed_vlm"`            // 视觉是否经过真实图片调用验证
+	ProbedJSON  bool   `json:"probed_json"`           // 推理是否经过真实 JSON 调用验证
+	HeuristicOK bool   `json:"heuristic_ok"`          // 启发式兜底结论（探测失败时使用）
+}
+
+// modelCapsCache 模型能力探测缓存：provider|model → 结果。
+// 只要模型不变就复用，避免每次切换模型都重复探测（进程内缓存，重启即失效）。
+type modelCapsCache struct {
+	mu    sync.RWMutex
+	items map[string]modelCaps
+}
+
+func newModelCapsCache() *modelCapsCache {
+	return &modelCapsCache{items: map[string]modelCaps{}}
+}
+
+func capsKey(provider, model string) string { return provider + "|" + model }
+
+// get 返回缓存的能力结果与是否存在。
+func (c *modelCapsCache) get(provider, model string) (modelCaps, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	v, ok := c.items[capsKey(provider, model)]
+	return v, ok
+}
+
+// put 写入/覆盖某个模型的能力结果。
+func (c *modelCapsCache) put(provider, model string, caps modelCaps) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items[capsKey(provider, model)] = caps
 }
 
 // visionNameKeywords 模型名中的视觉系关键词（端点元数据缺失时的启发式判定）。
@@ -235,7 +277,11 @@ func (s *Server) handleChatModels(w http.ResponseWriter, r *http.Request) {
 		if id == "" {
 			continue
 		}
+		// 已有真实探测缓存时以缓存为准，否则退回元数据 + 名称启发
 		vision, reasoning := detectModelCaps(id, entry)
+		if caps, ok := s.capsCache.get(name, id); ok {
+			vision, reasoning = caps.Vision, caps.Reasoning
+		}
 		models = append(models, chatModelInfo{ID: id, Vision: vision, Reasoning: reasoning})
 	}
 	slices.SortFunc(models, func(a, b chatModelInfo) int {
@@ -277,6 +323,17 @@ func (s *Server) handleChatStreamCheck(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	supported, detail := probeStream(r.Context(), client, p, model)
+	// 顺手写入能力缓存：流式结论端点级通用，视觉/推理保持缓存原值（未探测则启发式兜底）
+	if caps, ok := s.capsCache.get(name, model); ok {
+		caps.Stream, caps.StreamNote = supported, detail
+		s.capsCache.put(name, model, caps)
+	} else {
+		hv, hr := detectModelCaps(model, nil)
+		s.capsCache.put(name, model, modelCaps{
+			Vision: hv, Reasoning: hr, Stream: supported, StreamNote: detail,
+			ProbedAt: time.Now().Format(time.RFC3339), HeuristicOK: true,
+		})
+	}
 	respond(w, http.StatusOK, map[string]any{
 		"provider":         p.Name,
 		"model":            model,
@@ -285,6 +342,186 @@ func (s *Server) handleChatStreamCheck(w http.ResponseWriter, r *http.Request) {
 		"latency_ms":       time.Since(start).Milliseconds(),
 		"checked_at":       time.Now().Format(time.RFC3339),
 	})
+}
+
+// probeTinyPNG 1×1 透明 PNG（最小合法图片，用于视觉能力真实调用探测）。
+const probeTinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+// probeVision 真实调用一次多模态请求（1×1 PNG + 文本）判定视觉能力：
+// HTTP 200 且返回 choices 即认为接受图像输入；4xx/5xx 视为不支持。
+func probeVision(ctx context.Context, client *http.Client, p config.Provider, model string) (bool, string) {
+	payload := chatUpstream{
+		Model: model,
+		Messages: []chatWireMessage{{
+			Role: "user",
+			Content: []chatPart{
+				{Type: "image_url", ImageURL: &chatImageURL{URL: "data:image/png;base64," + probeTinyPNG}},
+				{Type: "text", Text: "图中是什么？用不超过5个字回答。"},
+			},
+		}},
+		MaxTokens: 32,
+	}
+	resp, err := doProviderRequest(ctx, client, p, http.MethodPost, "/chat/completions", payload)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, snippet(body))
+	}
+	var out chatCompletionResponse
+	if json.Unmarshal(body, &out) != nil || len(out.Choices) == 0 {
+		return false, "响应缺少 choices"
+	}
+	return true, ""
+}
+
+// probeReasoning 非流式调用一次，检查 reasoning_content / reasoning_tokens
+// 是否出现，判定模型是否输出思考链。
+func probeReasoning(ctx context.Context, client *http.Client, p config.Provider, model string) (bool, string) {
+	payload := chatUpstream{
+		Model:     model,
+		Messages:  wireMessages([]chatMessage{{Role: "user", Content: "你好"}}),
+		MaxTokens: 256, // 思考型模型可能先消耗推理 token，给足预算
+	}
+	resp, err := doProviderRequest(ctx, client, p, http.MethodPost, "/chat/completions", payload)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<10))
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, snippet(body))
+	}
+	// usage 结构因端点而异（reasoning_tokens 可能是顶层字段），宽松解析
+	var raw struct {
+		Choices []struct {
+			Message struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage map[string]any `json:"usage"`
+	}
+	if json.Unmarshal(body, &raw) != nil || len(raw.Choices) == 0 {
+		return false, "响应缺少 choices"
+	}
+	if raw.Choices[0].Message.ReasoningContent != "" {
+		return true, ""
+	}
+	if n, ok := raw.Usage["reasoning_tokens"].(float64); ok && n > 0 {
+		return true, ""
+	}
+	if cd, ok := raw.Usage["completion_tokens_details"].(map[string]any); ok {
+		if n, ok := cd["reasoning_tokens"].(float64); ok && n > 0 {
+			return true, ""
+		}
+	}
+	return false, ""
+}
+
+// probeModelCaps 综合探测一个模型的能力：视觉/推理各发一次真实请求，
+// 流式发一次最小流式请求；全部走通才写缓存（网络失败时回退启发式并标注）。
+func (s *Server) probeModelCaps(ctx context.Context, p config.Provider, model string) modelCaps {
+	client := s.factory.HTTPClient(p)
+	client.Timeout = 30 * time.Second
+
+	caps := modelCaps{ProbedAt: time.Now().Format(time.RFC3339)}
+	var visionOK, visionErr = probeVision(ctx, client, p, model)
+	if visionErr == "" {
+		caps.Vision, caps.ProbedVLM = visionOK, true
+	}
+	var reasonOK, reasonErr = probeReasoning(ctx, client, p, model)
+	if reasonErr == "" {
+		caps.Reasoning, caps.ProbedJSON = reasonOK, true
+	}
+	caps.Stream, caps.StreamNote = probeStream(ctx, client, p, model)
+
+	// 探测未覆盖或失败的维度回退启发式（元数据缺失时 entry 传 nil）
+	hv, hr := detectModelCaps(model, nil)
+	caps.HeuristicOK = true
+	if !caps.ProbedVLM {
+		caps.Vision = hv
+	}
+	if !caps.ProbedJSON {
+		caps.Reasoning = hr
+	}
+	for _, e := range []error{errOrNil(visionErr), errOrNil(reasonErr)} {
+		if e != nil {
+			caps.HeuristicOK = false
+			break
+		}
+	}
+	return caps
+}
+
+// errOrNil 空串→nil（用于统一判断探测是否出错）。
+func errOrNil(msg string) error {
+	if msg == "" {
+		return nil
+	}
+	return errors.New(msg)
+}
+
+// probeMu 串行化探测：避免并发请求同一未缓存模型时重复打端点。
+// handleModelCaps godoc
+// @Summary      探测并缓存模型能力
+// @Description  对指定 provider+model 真实调用接口检测视觉/推理/流式能力并缓存；模型不变时直接返回缓存结果（query: provider、model、force=1 跳过缓存强制重测）
+// @Tags         chat
+// @Produce      json
+// @Param        provider  query  string  true   "provider 名"
+// @Param        model     query  string  true   "模型名"
+// @Param        force     query  string  false  "force=1 强制重新探测"
+// @Success      200  {object}  map[string]any  "provider / model / vision / reasoning / stream / cached / probed_at"
+// @Failure      400  {object}  apiError
+// @Router       /api/providers/caps [get]
+func (s *Server) handleModelCaps(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("provider")
+	model := r.URL.Query().Get("model")
+	force := r.URL.Query().Get("force") == "1"
+	p, ok := s.factory.Provider(name)
+	if !ok {
+		fail(w, http.StatusBadRequest, "provider 未在 ai.yml 中声明: "+name)
+		return
+	}
+	if model == "" {
+		fail(w, http.StatusBadRequest, "缺少 model 参数")
+		return
+	}
+	if !force {
+		if caps, ok := s.capsCache.get(name, model); ok {
+			respond(w, http.StatusOK, capsResponse(p, model, caps, true))
+			return
+		}
+	}
+	// 单飞：同 key 并发请求只探测一次（先到者写缓存，其余读缓存）
+	s.probeLock.Lock()
+	if caps, ok := s.capsCache.get(name, model); ok && !force {
+		s.probeLock.Unlock()
+		respond(w, http.StatusOK, capsResponse(p, model, caps, true))
+		return
+	}
+	caps := s.probeModelCaps(r.Context(), p, model)
+	s.capsCache.put(name, model, caps)
+	s.probeLock.Unlock()
+	respond(w, http.StatusOK, capsResponse(p, model, caps, false))
+}
+
+// capsResponse 组装能力探测响应。
+func capsResponse(p config.Provider, model string, caps modelCaps, cached bool) map[string]any {
+	return map[string]any{
+		"provider":     p.Name,
+		"model":        model,
+		"vision":       caps.Vision,
+		"reasoning":    caps.Reasoning,
+		"stream":       caps.Stream,
+		"stream_note":  caps.StreamNote,
+		"probed_vlm":   caps.ProbedVLM,
+		"probed_json":  caps.ProbedJSON,
+		"heuristic_ok": caps.HeuristicOK,
+		"probed_at":    caps.ProbedAt,
+		"cached":       cached,
+	}
 }
 
 // probeStream 发一条 stream=true 的最小请求：2xx 且能读到 data: 帧 → 支持流式。
@@ -739,7 +976,7 @@ func (s *Server) chatDefault(f config.Feature) config.Step {
 	temp := s.cfg.LLM.Temperature
 	return config.Step{
 		Provider:    provider,
-		Model:       envOr("HARNESS_DEFAULT_MODEL", "qwen3-vl-8b"),
+		Model:       envOr("HARNESS_DEFAULT_MODEL", "qwen/qwen3-vl-8b"),
 		Temperature: &temp,
 		MaxTokens:   s.cfg.LLM.MaxTokens,
 	}

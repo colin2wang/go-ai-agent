@@ -27,6 +27,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("POST /api/providers/check", s.handleProviderCheck)
 	mux.HandleFunc("GET /api/providers/models", s.handleChatModels)            // 对话：模型列表
+	mux.HandleFunc("GET /api/providers/caps", s.handleModelCaps)               // 对话：模型能力探测（带缓存）
 	mux.HandleFunc("GET /api/providers/stream-check", s.handleChatStreamCheck) // 对话：流式能力探测
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)                    // 对话：SSE 流式回复
 	mux.HandleFunc("POST /api/features/{id}/run", s.handleRunFeature)

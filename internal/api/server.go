@@ -37,6 +37,9 @@ type Server struct {
 	features  []config.Feature
 	pipelines map[string]nodes.Deps // featureID → 工作流依赖
 
+	capsCache *modelCapsCache // 模型能力探测缓存（provider|model → 结果，模型不变即复用）
+	probeLock sync.Mutex      // 串行化能力探测：同 key 并发请求只探测一次
+
 	// Version 由 main 注入（ldflags 编译期版本）。
 	Version string
 
@@ -121,6 +124,9 @@ func New(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init llm factory: %w", err)
 	}
+	if cfg.LLM.IoLog.Debug {
+		factory.EnableWireDump() // HTTP 层抓包，排查端点交互问题
+	}
 	tmpDir, err := os.MkdirTemp("", "harness-upload-*")
 	if err != nil {
 		return nil, fmt.Errorf("create tmp dir: %w", err)
@@ -134,7 +140,7 @@ func New(cfg *config.Config) (*Server, error) {
 			Steps:   f.Steps,
 			Default: config.Step{
 				Provider:    cfg.LLM.DefaultProvider,
-				Model:       envOr("HARNESS_DEFAULT_MODEL", "qwen3-vl-8b"),
+				Model:       envOr("HARNESS_DEFAULT_MODEL", "qwen/qwen3-vl-8b"),
 				Temperature: &cfg.LLM.Temperature,
 				MaxTokens:   cfg.LLM.MaxTokens,
 			},
@@ -155,6 +161,7 @@ func New(cfg *config.Config) (*Server, error) {
 		tmpDir:    tmpDir,
 		features:  cfg.Resolved,
 		pipelines: pipelines,
+		capsCache: newModelCapsCache(),
 		jobs:      map[string]*JobResult{},
 	}, nil
 }

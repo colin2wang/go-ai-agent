@@ -2,9 +2,16 @@
 package nodes
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/gif"
+	"image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,8 +102,11 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			s.Err = fmt.Errorf("未收到任何工资单图片")
 			return s, s.Err
 		}
-		// 全部图片作为多个 BinaryPart 放入同一条多模态消息，模型输出合并后的单份 JSON，
+		// 全部图片放入同一条多模态消息，模型输出合并后的单份 JSON，
 		// 下游 translate/proofread/expert 无需感知图片数量。
+		// 注意：不能用 BinaryPart——langchaingo v0.1.14 会把它序列化为私有
+		// {"type":"binary"} 格式，LM Studio 不识别导致图片被静默忽略、空回答。
+		// 统一构造标准 OpenAI image_url（data URL），与 chat 路径 wire 格式一致。
 		parts := make([]llms.ContentPart, 0, len(images)+1)
 		for i, p := range images {
 			img, err := os.ReadFile(p)
@@ -104,7 +114,7 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 				s.Err = fmt.Errorf("读取第 %d 张图片失败: %w", i+1, err)
 				return s, s.Err
 			}
-			parts = append(parts, llms.BinaryPart(mimeOf(p), img))
+			parts = append(parts, llms.ImageURLContent{URL: imageDataURL(mimeOf(p), img)})
 		}
 		parts = append(parts, llms.TextPart(prompt.OCRUser))
 		messages := []llms.MessageContent{
@@ -158,15 +168,20 @@ func Proofread(d Deps) func(ctx context.Context, s State) (State, error) {
 			s.Err = err
 			return s, err
 		}
-		var result struct {
-			Valid  bool     `json:"valid"`
-			Issues []string `json:"issues"`
+		var parsed struct {
+			Valid  bool            `json:"valid"`
+			Issues json.RawMessage `json:"issues"`
 		}
-		if err := json.Unmarshal([]byte(stripJSONFence(text)), &result); err != nil {
+		if err := json.Unmarshal([]byte(stripJSONFence(text)), &parsed); err != nil {
 			s.Err = fmt.Errorf("proofread 输出非法 JSON: %w", err)
 			return s, s.Err
 		}
-		s.ReviewNotes = result.Issues
+		notes, err := parseProofIssues(parsed.Issues)
+		if err != nil {
+			s.Err = fmt.Errorf("proofread issues 解析失败: %w", err)
+			return s, s.Err
+		}
+		s.ReviewNotes = notes
 		// 同步填充 Structured（验收关键字段用）
 		var fields map[string]any
 		if err := json.Unmarshal([]byte(stripJSONFence(s.OCRText)), &fields); err == nil {
@@ -175,6 +190,47 @@ func Proofread(d Deps) func(ctx context.Context, s State) (State, error) {
 		s.Err = nil
 		return s, nil
 	}
+}
+
+// proofIssue issues 对象的单条形态（field + description）。
+type proofIssue struct {
+	Field       string `json:"field"`
+	Description string `json:"description"`
+}
+
+// parseProofIssues 将 proofread 返回的 issues 解析为 []string（供下游渲染）。
+// 兼容模型可能返回的多种形态，避免单形态强约束导致「非法 JSON」类报错：
+//  1. 对象数组 [{field, description}]（提示词要求的标准形态）
+//  2. 字符串数组 ["..."]
+//  3. 单个字符串 "..."（或数字等标量）
+func parseProofIssues(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return nil, nil
+	}
+	// 1) 对象数组（标准形态）
+	var objs []proofIssue
+	if json.Unmarshal(raw, &objs) == nil {
+		out := make([]string, 0, len(objs))
+		for _, it := range objs {
+			if it.Field != "" {
+				out = append(out, it.Field+": "+it.Description)
+			} else {
+				out = append(out, it.Description)
+			}
+		}
+		return out, nil
+	}
+	// 2) 字符串数组
+	var strs []string
+	if json.Unmarshal(raw, &strs) == nil {
+		return strs, nil
+	}
+	// 3) 单个标量
+	var single string
+	if json.Unmarshal(raw, &single) == nil {
+		return []string{single}, nil
+	}
+	return nil, fmt.Errorf("issues 形态无法识别: %s", string(bytes.TrimSpace(raw)))
 }
 
 // Expert 专家分析节点。
@@ -217,7 +273,133 @@ func Analyze(d Deps) func(ctx context.Context, s State) (State, error) {
 	}
 }
 
-// mimeOf 按扩展名推断图片 MIME（默认 image/png）。
+// maxImageLongEdge 发送前将超长边图片等比缩放到此像素内。
+// 扫描版图书目录/工资单常为高分辨率大图，本地 VLM（如 LM Studio 上的
+// Qwen3-VL）对超大图片会静默丢弃、直接返回空回答（表现为 choices=1 但
+// content 为空、耗时极短）。先验缩放到合理分辨率可显著降低视觉 token 量、
+// 规避该问题，同时保持文本清晰可读。
+const maxImageLongEdge = 1600
+
+// imageDataURL 将图片字节编码为标准 OpenAI 多模态 data URL（image_url.url）。
+// 发送前会：1) 按实际内容（magic bytes）推断 MIME，避免扩展名与内容不符导致
+// 后端无法解码而静默返回空；2) 对超长边图片做等比缩小，降低视觉 token 量。
+// 解码/缩放失败时回退为原图直接编码，交给后端决定。
+func imageDataURL(declaredMime string, data []byte) string {
+	mime := detectMime(data)
+	if mime == "" {
+		mime = declaredMime
+	}
+
+	// 仅对 stdlib 可解码的格式做缩小（png/jpeg/gif 已注册）。
+	// webp/bmp 等无法 stdlib 解码时直接原样发送。
+	out, outMime := data, mime
+	switch mime {
+	case "image/png", "image/jpeg", "image/gif":
+		if src, _, err := image.Decode(bytes.NewReader(data)); err == nil {
+			resized := downscale(src, maxImageLongEdge)
+			var buf bytes.Buffer
+			var encErr error
+			switch mime {
+			case "image/png":
+				encErr = png.Encode(&buf, resized)
+			case "image/jpeg":
+				encErr = jpeg.Encode(&buf, resized, &jpeg.Options{Quality: 90})
+			default: // gif：缩小后按 png 重编码（保留无损且体积更小）
+				encErr = png.Encode(&buf, resized)
+				outMime = "image/png"
+			}
+			if encErr == nil && buf.Len() > 0 {
+				out = buf.Bytes()
+			}
+		}
+	}
+	return "data:" + outMime + ";base64," + base64.StdEncoding.EncodeToString(out)
+}
+
+// detectMime 按文件头 magic bytes 推断真实 MIME（比扩展名可靠）。
+func detectMime(data []byte) string {
+	switch {
+	case len(data) >= 8 && bytes.Equal(data[:8], []byte("\x89PNG\r\n\x1a\n")):
+		return "image/png"
+	case len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF:
+		return "image/jpeg"
+	case len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP":
+		return "image/webp"
+	case len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a"):
+		return "image/gif"
+	case len(data) >= 2 && data[0] == 'B' && data[1] == 'M':
+		return "image/bmp"
+	default:
+		return ""
+	}
+}
+
+// downscale 将图片等比缩放到 longEdge 像素内（仅在超出时缩放）。
+// 采用盒式(box)采样平均，避免直接最近邻带来的锯齿，对 OCR 文本足够清晰。
+func downscale(src image.Image, longEdge int) image.Image {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	long := w
+	if h > long {
+		long = h
+	}
+	if long <= longEdge {
+		return src
+	}
+	scale := float64(longEdge) / float64(long)
+	dw := int(float64(w)*scale + 0.5)
+	dh := int(float64(h)*scale + 0.5)
+	if dw < 1 {
+		dw = 1
+	}
+	if dh < 1 {
+		dh = 1
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for y := 0; y < dh; y++ {
+		sy0 := int(float64(y) / scale)
+		sy1 := int(float64(y+1)/scale + 0.5)
+		if sy1 <= sy0 {
+			sy1 = sy0 + 1
+		}
+		if sy1 > h {
+			sy1 = h
+		}
+		for x := 0; x < dw; x++ {
+			sx0 := int(float64(x) / scale)
+			sx1 := int(float64(x+1)/scale + 0.5)
+			if sx1 <= sx0 {
+				sx1 = sx0 + 1
+			}
+			if sx1 > w {
+				sx1 = w
+			}
+			var r, g, bl, a uint64
+			var n int
+			for sy := sy0; sy < sy1; sy++ {
+				for sx := sx0; sx < sx1; sx++ {
+					pr, pg, pb, pa := src.At(b.Min.X+sx, b.Min.Y+sy).RGBA()
+					r += uint64(pr)
+					g += uint64(pg)
+					bl += uint64(pb)
+					a += uint64(pa)
+					n++
+				}
+			}
+			if n > 0 {
+				dst.SetRGBA(x, y, color.RGBA{
+					R: uint8(r / uint64(n) >> 8),
+					G: uint8(g / uint64(n) >> 8),
+					B: uint8(bl / uint64(n) >> 8),
+					A: uint8(a / uint64(n) >> 8),
+				})
+			}
+		}
+	}
+	return dst
+}
+
+// mimeOf 按扩展名推断图片 MIME（默认 image/png），仅作回退用途。
 func mimeOf(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".jpg", ".jpeg":

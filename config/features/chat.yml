@@ -44,7 +44,7 @@ chat:
 steps:
   chat:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     temperature: 0.7
     max-tokens: 4096
 

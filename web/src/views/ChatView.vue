@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
-import { fetchProviderModels, sendChat } from '../api'
+import { fetchModelCaps, fetchProviderModels, sendChat } from '../api'
 import { duration } from '../chart'
 import { renderMarkdown } from '../markdown'
-import type { FeatureInfo, ModelInfo, ProviderInfo } from '../types'
+import type { FeatureInfo, ModelCaps, ModelInfo, ProviderInfo } from '../types'
 import type { ChatImage, ChatMessage } from '../types'
 
 const props = defineProps<{
@@ -92,8 +92,15 @@ async function loadModels() {
   if (!models.value.some((m) => m.id === model.value)) model.value = models.value[0]?.id ?? ''
 }
 
-/** 当前选中模型的能力信息（能力标签展示用）。 */
-const selectedModel = computed(() => models.value.find((m) => m.id === model.value) ?? null)
+/** 当前选中模型的能力信息（能力标签展示用；真实探测结果优先于列表启发式）。 */
+const selectedModel = computed(() => {
+  const base = models.value.find((m) => m.id === model.value) ?? null
+  const caps = probedCaps.value
+  if (base && caps && caps.model === model.value) {
+    return { ...base, vision: caps.vision, reasoning: caps.reasoning }
+  }
+  return base
+})
 
 /** 下拉选项里的能力后缀（原生 select 无法渲染 chip，用文本补充）。 */
 function optionSuffix(m: ModelInfo): string {
@@ -211,6 +218,28 @@ const previewSrc = ref('')
 function onGlobalKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') previewSrc.value = ''
 }
+
+// ---- 模型能力探测（后端缓存：模型不变时直接返回缓存结果） ----
+// 切换模型后异步探测真实能力（视觉/推理/流式），探测期间先用模型列表的启发式结论。
+const probedCaps = ref<ModelCaps | null>(null)
+const probingCaps = ref(false)
+
+watch(
+  [providerName, model],
+  async ([p, m]) => {
+    probedCaps.value = null
+    if (!p || !m) return
+    probingCaps.value = true
+    try {
+      probedCaps.value = await fetchModelCaps(p, m)
+    } catch {
+      // 探测失败不阻塞对话：保持列表启发式结论
+    } finally {
+      probingCaps.value = false
+    }
+  },
+  { immediate: true },
+)
 
 watch(model, () => {
   if (!visionReady.value && attachments.value.length) {

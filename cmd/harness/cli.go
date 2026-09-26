@@ -61,13 +61,16 @@ func cliRun() error {
 	if err != nil {
 		return fmt.Errorf("init llm factory: %w", err)
 	}
+	if cfg.LLM.IoLog.Debug {
+		factory.EnableWireDump() // HTTP 层抓包，排查端点交互问题
+	}
 
 	app, err := graph.Build(nodes.Deps{
 		Factory: factory,
 		Steps:   feat.Steps,
 		Default: config.Step{
 			Provider:    cfg.LLM.DefaultProvider,
-			Model:       envOr("HARNESS_DEFAULT_MODEL", "qwen3-vl-8b"),
+			Model:       envOr("HARNESS_DEFAULT_MODEL", "qwen/qwen3-vl-8b"),
 			Temperature: &cfg.LLM.Temperature,
 			MaxTokens:   cfg.LLM.MaxTokens,
 		},

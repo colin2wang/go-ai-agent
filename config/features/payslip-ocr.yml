@@ -38,7 +38,7 @@ steps:
   # 视觉 OCR：截图 → 结构化 JSON（需 VLM）
   ocr:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     prompt-template: ocr-default
     temperature: 0.1
     max-tokens: 8192
@@ -47,7 +47,7 @@ steps:
   # 翻译：结构化 JSON → 英文（可换成纯文本模型，如 qwen3-8b）
   translate:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     prompt-template: translate-default
     temperature: 0.3
     max-tokens: 4096
@@ -55,7 +55,7 @@ steps:
   # 审读校验：逐字段核对，输出 valid + issues
   proofread:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     prompt-template: proofread-default
     temperature: 0.1
     max-tokens: 4096
@@ -64,7 +64,7 @@ steps:
   # 专家分析：薪酬/税务视角的专业报告
   expert:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     prompt-template: expert-default
     temperature: 0.5
     max-tokens: 4096
@@ -72,7 +72,7 @@ steps:
   # 汇总：整合前序结果输出最终报告
   analyze:
     provider: lmstudio-local
-    model: qwen3-vl-8b
+    model: qwen/qwen3-vl-8b
     prompt-template: analyze-default
     temperature: 0.3
     max-tokens: 8192

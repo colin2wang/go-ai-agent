@@ -11,7 +11,7 @@
 # ============================================================================
 llm:
   # ---- 全局默认回退值（provider / 步骤未填时回退到这里）----
-  base-url: http://localhost:1234
+  base-url: http://localhost:1234/v1
   api-key: lm-studio
   temperature: 0.3
   timeout-seconds: 600
@@ -29,6 +29,10 @@ llm:
     enabled: true
     head-chars: 1000
     tail-chars: 1000
+    # 调试模式：额外输出完整提交文本（多模态仅文本部分与图片 data URL 长度）与模型原始
+    # 输出（含 reasoning 与 token 用量），不截断不折叠；同时开启 HTTP 层抓包（wire dump，
+    # 记录发给端点的原始请求体与端点原始响应，base64 只记长度）。用于排查空回答等问题。
+    debug: true
 
   # 统一以流式接收模型返回消息（推理 REASONING + 回答 ANSWER 增量块经 LlmStreamOutput 累积），
   # 默认开启；关闭时回退一次返回的普通调用。
@@ -44,11 +48,13 @@ llm:
 
   # ===== 多种 AI 后端连接端点 =====
   providers:
-    # 1) LM Studio 本地推理（OpenAI 兼容）。注意：langchaingo 会自动追加 /v1 前缀，
-    #    因此 base-url 不要带 /v1 后缀（写了也会被自动去除）。
+    # 1) LM Studio 本地推理（OpenAI 兼容）。base-url 必须带 /v1：
+    #    langchaingo 仅做 baseURL + "/chat/completions" 的拼接，不会自动补 /v1，
+    #    少写 /v1 会打到不存在的 /chat/completions，端点返回
+    #    "Unexpected endpoint or method" 且 HTTP 200，表现为「空回答」。
     - name: lmstudio-local
       type: lmstudio
-      base-url: http://localhost:1234
+      base-url: http://localhost:1234/v1
       api-key: lm-studio
       timeout-seconds: 600
       connect-timeout-seconds: 10
@@ -57,7 +63,7 @@ llm:
     # 2) Ollama 本地服务（0.1.27+ 提供 OpenAI 兼容 /v1 端点）
     - name: ollama-local
       type: ollama
-      base-url: http://localhost:11434
+      base-url: http://localhost:11434/v1
       api-key: ollama
       timeout-seconds: 600
       connect-timeout-seconds: 10
@@ -68,7 +74,7 @@ llm:
     #    无需单独声明 provider，由子功能步骤的 provider + model 指定即可。
     - name: openai-cloud
       type: openai-compatible
-      base-url: https://api.openai.com
+      base-url: https://api.openai.com/v1
       api-key: ${OPENAI_API_KEY:sk-your-key-here}
       timeout-seconds: 120
       connect-timeout-seconds: 10

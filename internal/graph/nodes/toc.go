@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"sort"
@@ -64,11 +65,14 @@ func TocOCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			}
 			messages := []llms.MessageContent{
 				llms.TextParts(llms.ChatMessageTypeSystem, prompt.TOCOCRSystem),
+				// langchaingo v0.1.14 会把 BinaryPart 序列化为其私有 {"type":"binary"} 格式，
+				// LM Studio 等端点不识别导致图片被静默忽略、模型空回答。
+				// 这里直接构造标准 OpenAI image_url（data URL），与 chat 路径的 wire 格式一致。
 				{
 					// 多模态消息必须显式声明 role，否则 langchaingo 报 "role not supported"
 					Role: llms.ChatMessageTypeHuman,
 					Parts: []llms.ContentPart{
-						llms.BinaryPart(mimeOf(p), img),
+						llms.ImageURLContent{URL: imageDataURL(mimeOf(p), img)},
 						llms.TextPart(prompt.TOCOCRUser),
 					},
 				},
@@ -77,6 +81,16 @@ func TocOCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			if err != nil {
 				s.Err = fmt.Errorf("第 %d 页 OCR 失败: %w", i+1, err)
 				return s, s.Err
+			}
+			// 空回答不立即失败，保留到 merge 阶段回退合并时统一裁决
+			if strings.TrimSpace(text) == "" {
+				slog.Warn("toc ocr 空回答",
+					slog.Int("page", i+1), slog.String("provider", st.Provider), slog.String("model", st.Model))
+			} else {
+				slog.Info("toc ocr 完成",
+					slog.Int("page", i+1),
+					slog.Int("answer_chars", len([]rune(text))),
+					slog.String("preview", onelinePreview(text)))
 			}
 			outs = append(outs, text)
 		}
@@ -108,6 +122,14 @@ func TocMerge(d Deps) func(ctx context.Context, s State) (State, error) {
 			llms.TextParts(llms.ChatMessageTypeHuman, b.String()),
 		}
 		text, err := d.call(ctx, "merge", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
+		if err != nil {
+			slog.Warn("toc merge LLM 调用失败，将回退逐页合并", slog.String("error", err.Error()))
+		} else if strings.TrimSpace(text) == "" {
+			slog.Warn("toc merge LLM 空回答，将回退逐页合并",
+				slog.String("provider", st.Provider), slog.String("model", st.Model))
+		} else {
+			slog.Info("toc merge 完成", slog.Int("answer_chars", len([]rune(text))))
+		}
 
 		var entries []TOCEntry
 		title := ""
@@ -180,6 +202,15 @@ func TocRender(d Deps) func(ctx context.Context, s State) (State, error) {
 		s.Err = nil
 		return s, nil
 	}
+}
+
+// onelinePreview 将多行文本折叠为单行并截断，用于日志预览。
+func onelinePreview(s string) string {
+	line := strings.Join(strings.Fields(s), " ")
+	if len(line) > 200 {
+		line = line[:200] + "..."
+	}
+	return line
 }
 
 // parseTOC 解析目录 JSON：支持 {"title","entries"} 与裸数组两种形式。

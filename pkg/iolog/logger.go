@@ -18,11 +18,12 @@ type Logger struct {
 	enabled   bool
 	headChars int
 	tailChars int
+	debug     bool
 }
 
 // New 根据配置创建；enabled=false 时所有方法为空操作。
 func New(cfg config.IoLog) *Logger {
-	return &Logger{enabled: cfg.Enabled, headChars: cfg.HeadChars, tailChars: cfg.TailChars}
+	return &Logger{enabled: cfg.Enabled, headChars: cfg.HeadChars, tailChars: cfg.TailChars, debug: cfg.Debug}
 }
 
 // Hook 返回注入 llm.Factory 的钩子（始终非 nil，禁用时内部短路）。
@@ -82,6 +83,8 @@ func (l *Logger) logRequest(requestID, provider, model string, messages []llms.M
 				totalChars += len([]rune(p.Text))
 			case llms.BinaryContent:
 				totalChars += len(p.Data)
+			case llms.ImageURLContent:
+				totalChars += len(p.URL)
 			}
 		}
 	}
@@ -124,6 +127,28 @@ func (l *Logger) logRequest(requestID, provider, model string, messages []llms.M
 	}
 	attrs = append(attrs, slog.String("input", strings.TrimSuffix(b.String(), sep)))
 	slog.Info("llm io-log request", attrs...)
+
+	// 调试模式：完整输出提交文本（多模态仅文本部分与图片 data URL 长度，不倾倒 base64），不截断不折叠
+	if l.debug {
+		var db strings.Builder
+		for i, m := range messages {
+			for _, part := range m.Parts {
+				switch p := part.(type) {
+				case llms.TextContent:
+					fmt.Fprintf(&db, "[msg %d %s]\n%s\n", i, m.Role, p.Text)
+				case llms.BinaryContent:
+					fmt.Fprintf(&db, "[msg %d %s] <binary mime=%s bytes=%d>\n", i, m.Role, p.MIMEType, len(p.Data))
+				case llms.ImageURLContent:
+					// data URL 前缀含 mime，body 为 base64；只记录长度避免刷屏
+					fmt.Fprintf(&db, "[msg %d %s] <image_url url_len=%d>\n", i, m.Role, len(p.URL))
+				}
+			}
+		}
+		slog.Info("llm io-log request full",
+			slog.String("request_id", requestID),
+			slog.String("input_full", db.String()),
+		)
+	}
 }
 
 // logResponse 记录一次调用的输出：answer 与 reasoning 均截断 + 折叠为单行；
@@ -136,13 +161,17 @@ func (l *Logger) logResponse(requestID, provider, model string, resp *llms.Conte
 		requestID = newUUID()
 	}
 	if err != nil {
-		slog.Error("llm io-log response",
+		attrs := []any{
 			slog.String("request_id", requestID),
 			slog.String("provider", provider),
 			slog.String("model", model),
 			slog.Int64("latency_ms", latencyMs),
 			slog.String("error", err.Error()),
-		)
+		}
+		if l.debug {
+			attrs = append(attrs, slog.String("error_full", fmt.Sprintf("%+v", err)))
+		}
+		slog.Error("llm io-log response", attrs...)
 		return
 	}
 	answer := ""
@@ -150,6 +179,17 @@ func (l *Logger) logResponse(requestID, provider, model string, resp *llms.Conte
 		answer = resp.Choices[0].Content
 	}
 	reasoning := extractReasoning(resp)
+	// 空回答告警：错误路径之外的空回答通常意味着 reasoning 吃光 token 预算
+	// 或后端未正确返回 content，单独标 WARN 便于检索。
+	if answer == "" && reasoning == "" {
+		slog.Warn("llm io-log response empty",
+			slog.String("request_id", requestID),
+			slog.String("provider", provider),
+			slog.String("model", model),
+			slog.Int64("latency_ms", latencyMs),
+			slog.Int("choices", len(resp.Choices)),
+		)
+	}
 	attrs := []any{
 		slog.String("request_id", requestID),
 		slog.String("provider", provider),
@@ -164,7 +204,22 @@ func (l *Logger) logResponse(requestID, provider, model string, resp *llms.Conte
 			slog.String("reasoning", oneline(Truncate(reasoning, l.headChars, l.tailChars))),
 		)
 	}
+	if pt, ct := usageTokens(resp); pt > 0 || ct > 0 {
+		attrs = append(attrs,
+			slog.Int("prompt_tokens", pt),
+			slog.Int("completion_tokens", ct),
+		)
+	}
 	slog.Info("llm io-log response", attrs...)
+
+	// 调试模式：完整输出模型原始回答与思考链（不截断不折叠），便于排查解析失败
+	if l.debug {
+		slog.Info("llm io-log response full",
+			slog.String("request_id", requestID),
+			slog.String("answer_full", answer),
+			slog.String("reasoning_full", reasoning),
+		)
+	}
 }
 
 // extractReasoning 兼容 langchaingo 不同字段名，尽力提取思考链文本。
@@ -177,4 +232,32 @@ func extractReasoning(resp *llms.ContentResponse) string {
 		return c.ReasoningContent
 	}
 	return ""
+}
+
+// usageTokens 尽力从 GenerationInfo 提取 token 用量（与 internal/llm 逻辑一致，避免包循环）。
+func usageTokens(resp *llms.ContentResponse) (prompt, completion int) {
+	if resp == nil || len(resp.Choices) == 0 {
+		return 0, 0
+	}
+	info := resp.Choices[0].GenerationInfo
+	if info == nil {
+		return 0, 0
+	}
+	getInt := func(keys ...string) int {
+		for _, k := range keys {
+			if v, ok := info[k]; ok {
+				switch n := v.(type) {
+				case int:
+					return n
+				case int64:
+					return int(n)
+				case float64:
+					return int(n)
+				}
+			}
+		}
+		return 0
+	}
+	return getInt("PromptTokens", "prompt_tokens"),
+		getInt("CompletionTokens", "completion_tokens")
 }
