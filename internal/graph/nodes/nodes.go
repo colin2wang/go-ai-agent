@@ -20,7 +20,6 @@ import (
 
 	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/llm"
-	"go-ai-agent/internal/prompt"
 	"go-ai-agent/internal/tmpl"
 )
 
@@ -143,158 +142,11 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 	}
 }
 
-// stepPrompt 返回步骤的系统/用户提示词：优先用 yml 的 system-prompt/user-prompt，
-// 缺失时回退 internal/prompt 的内置默认（prompt.Defaults）。
+// stepPrompt 返回步骤的系统/用户提示词（直接来自 yml 的 system-prompt/user-prompt）。
+// 提示词的唯一定义位置是各子功能的 features/*.yml，不在此处硬编码任何文本。
 func (d Deps) stepPrompt(name string) (system, user string) {
 	st := d.stepCfg(name)
-	system, user = st.SystemPrompt, st.UserPrompt
-	if system == "" || user == "" {
-		defSys, defUsr := prompt.Defaults(name)
-		if system == "" {
-			system = defSys
-		}
-		if user == "" {
-			user = defUsr
-		}
-	}
-	return
-}
-
-// Translate 翻译节点：复用同一工厂，仅切换 provider+model+prompt。
-func Translate(d Deps) func(ctx context.Context, s State) (State, error) {
-	return func(ctx context.Context, s State) (State, error) {
-		st := d.stepCfg("translate")
-		messages := []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, prompt.TranslateSystem),
-			llms.TextParts(llms.ChatMessageTypeHuman, s.OCRText),
-		}
-		text, err := d.call(ctx, "translate", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
-		if err != nil {
-			s.Err = err
-			return s, err
-		}
-		s.Translation = text
-		s.Err = nil
-		return s, nil
-	}
-}
-
-// Proofread 审读节点：校验字段，结果写入 ReviewNotes，并尽力解析 OCR JSON 到 Structured。
-func Proofread(d Deps) func(ctx context.Context, s State) (State, error) {
-	return func(ctx context.Context, s State) (State, error) {
-		st := d.stepCfg("proofread")
-		messages := []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, prompt.ProofreadSystem),
-			llms.TextParts(llms.ChatMessageTypeHuman, s.OCRText),
-		}
-		text, err := d.call(ctx, "proofread", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
-		if err != nil {
-			s.Err = err
-			return s, err
-		}
-		var parsed struct {
-			Valid  bool            `json:"valid"`
-			Issues json.RawMessage `json:"issues"`
-		}
-		if err := json.Unmarshal([]byte(stripJSONFence(text)), &parsed); err != nil {
-			s.Err = fmt.Errorf("proofread 输出非法 JSON: %w", err)
-			return s, s.Err
-		}
-		notes, err := parseProofIssues(parsed.Issues)
-		if err != nil {
-			s.Err = fmt.Errorf("proofread issues 解析失败: %w", err)
-			return s, s.Err
-		}
-		s.ReviewNotes = notes
-		// 同步填充 Structured（验收关键字段用）
-		var fields map[string]any
-		if err := json.Unmarshal([]byte(stripJSONFence(s.OCRText)), &fields); err == nil {
-			s.Structured = fields
-		}
-		s.Err = nil
-		return s, nil
-	}
-}
-
-// proofIssue issues 对象的单条形态（field + description）。
-type proofIssue struct {
-	Field       string `json:"field"`
-	Description string `json:"description"`
-}
-
-// parseProofIssues 将 proofread 返回的 issues 解析为 []string（供下游渲染）。
-// 兼容模型可能返回的多种形态，避免单形态强约束导致「非法 JSON」类报错：
-//  1. 对象数组 [{field, description}]（提示词要求的标准形态）
-//  2. 字符串数组 ["..."]
-//  3. 单个字符串 "..."（或数字等标量）
-func parseProofIssues(raw json.RawMessage) ([]string, error) {
-	if len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null" {
-		return nil, nil
-	}
-	// 1) 对象数组（标准形态）
-	var objs []proofIssue
-	if json.Unmarshal(raw, &objs) == nil {
-		out := make([]string, 0, len(objs))
-		for _, it := range objs {
-			if it.Field != "" {
-				out = append(out, it.Field+": "+it.Description)
-			} else {
-				out = append(out, it.Description)
-			}
-		}
-		return out, nil
-	}
-	// 2) 字符串数组
-	var strs []string
-	if json.Unmarshal(raw, &strs) == nil {
-		return strs, nil
-	}
-	// 3) 单个标量
-	var single string
-	if json.Unmarshal(raw, &single) == nil {
-		return []string{single}, nil
-	}
-	return nil, fmt.Errorf("issues 形态无法识别: %s", string(bytes.TrimSpace(raw)))
-}
-
-// Expert 专家分析节点。
-func Expert(d Deps) func(ctx context.Context, s State) (State, error) {
-	return func(ctx context.Context, s State) (State, error) {
-		st := d.stepCfg("expert")
-		messages := []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, prompt.ExpertSystem),
-			llms.TextParts(llms.ChatMessageTypeHuman, s.OCRText),
-		}
-		text, err := d.call(ctx, "expert", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
-		if err != nil {
-			s.Err = err
-			return s, err
-		}
-		s.ExpertReport = text
-		s.Err = nil
-		return s, nil
-	}
-}
-
-// Analyze 汇总最终报告节点。
-func Analyze(d Deps) func(ctx context.Context, s State) (State, error) {
-	return func(ctx context.Context, s State) (State, error) {
-		st := d.stepCfg("analyze")
-		input := fmt.Sprintf("## OCR 结果\n%s\n\n## 翻译\n%s\n\n## 审读结论\n%v\n\n## 专家分析\n%s",
-			s.OCRText, s.Translation, s.ReviewNotes, s.ExpertReport)
-		messages := []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, prompt.AnalyzeSystem),
-			llms.TextParts(llms.ChatMessageTypeHuman, input),
-		}
-		text, err := d.call(ctx, "analyze", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
-		if err != nil {
-			s.Err = err
-			return s, err
-		}
-		s.FinalReport = text
-		s.Err = nil
-		return s, nil
-	}
+	return st.SystemPrompt, st.UserPrompt
 }
 
 // maxImageLongEdge 发送前将超长边图片等比缩放到此像素内。

@@ -16,7 +16,6 @@ import (
 
 	"github.com/tmc/langchaingo/llms"
 
-	"go-ai-agent/internal/prompt"
 	"go-ai-agent/internal/tmpl"
 )
 
@@ -63,8 +62,9 @@ func TocOCR(d Deps) func(ctx context.Context, s State) (State, error) {
 				s.Err = fmt.Errorf("读取第 %d 页失败: %w", i+1, err)
 				return s, s.Err
 			}
+			sys, usr := d.stepPrompt("ocr")
 			messages := []llms.MessageContent{
-				llms.TextParts(llms.ChatMessageTypeSystem, prompt.TOCOCRSystem),
+				llms.TextParts(llms.ChatMessageTypeSystem, sys),
 				// langchaingo v0.1.14 会把 BinaryPart 序列化为其私有 {"type":"binary"} 格式，
 				// LM Studio 等端点不识别导致图片被静默忽略、模型空回答。
 				// 这里直接构造标准 OpenAI image_url（data URL），与 chat 路径的 wire 格式一致。
@@ -73,7 +73,7 @@ func TocOCR(d Deps) func(ctx context.Context, s State) (State, error) {
 					Role: llms.ChatMessageTypeHuman,
 					Parts: []llms.ContentPart{
 						llms.ImageURLContent{URL: imageDataURL(mimeOf(p), img)},
-						llms.TextPart(prompt.TOCOCRUser),
+						llms.TextPart(usr),
 					},
 				},
 			}
@@ -117,8 +117,9 @@ func TocMerge(d Deps) func(ctx context.Context, s State) (State, error) {
 		}
 
 		st := d.stepCfg("merge")
+		sys, _ := d.stepPrompt("merge")
 		messages := []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, prompt.TOCMergeSystem),
+			llms.TextParts(llms.ChatMessageTypeSystem, sys),
 			llms.TextParts(llms.ChatMessageTypeHuman, b.String()),
 		}
 		text, err := d.call(ctx, "merge", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)

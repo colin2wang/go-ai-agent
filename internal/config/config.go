@@ -401,6 +401,11 @@ func (c *Config) validate() error {
 			}
 		}
 		for name, st := range f.Steps {
+			// 提示词（系统/用户）必须写在对应 features/*.yml 的 system-prompt/user-prompt 中，
+			// 代码内不再硬编码任何提示词。对话类走 chat.system-prompt，render 为本地模板渲染。
+			if !f.IsChat() && name != "render" && strings.TrimSpace(st.SystemPrompt) == "" {
+				return fmt.Errorf("features.%s.steps.%s: 缺少 system-prompt（提示词必须写在对应 features/*.yml 中）", f.ID, name)
+			}
 			if st.Model == "" {
 				return fmt.Errorf("features.%s.steps.%s: 模型无全局默认，必须显式指定 model", f.ID, name)
 			}
