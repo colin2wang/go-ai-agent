@@ -286,6 +286,9 @@ async function submit() {
   attachError.value = ''
   fallbackNote.value = ''
   const stream = wantStream.value
+  // 捕获发送时使用的端点 / 模型快照：追加到回复气泡底部 meta，
+  // 之后切换下拉选择不会影响已发送消息的展示。
+  const usedSrc = `${providerName.value} / ${model.value}`
   messages.value.push({ role: 'assistant', content: '', streaming: stream })
   // 关键：必须取数组里的响应式代理元素继续修改；
   // 直接改 push 前的原始对象不会触发流式增量重渲染（只能等结束才整段显示）。
@@ -316,7 +319,7 @@ async function submit() {
           },
           onDone: (done) => {
             reply.streaming = false
-            reply.meta = `${duration(done.duration_ms)} · ↑${done.prompt_tokens} ↓${done.completion_tokens} tokens`
+            reply.meta = `${duration(done.duration_ms)} · ↑${done.prompt_tokens} ↓${done.completion_tokens} tokens · ${usedSrc}`
           },
         },
         abort.signal,
@@ -328,7 +331,7 @@ async function submit() {
         wantStream.value = false
         reply.content = res.answer
         reply.reasoning = res.reasoning
-        reply.meta = `${duration(res.duration_ms ?? 0)} · ↑${res.prompt_tokens} ↓${res.completion_tokens} tokens`
+        reply.meta = `${duration(res.duration_ms ?? 0)} · ↑${res.prompt_tokens} ↓${res.completion_tokens} tokens · ${usedSrc}`
       }
     } else {
       const res = await sendChat(
@@ -345,7 +348,7 @@ async function submit() {
       if (res) {
         reply.content = res.answer
         reply.reasoning = res.reasoning
-        reply.meta = `↑${res.prompt_tokens} ↓${res.completion_tokens} tokens`
+        reply.meta = `↑${res.prompt_tokens} ↓${res.completion_tokens} tokens · ${usedSrc}`
       }
     }
     emit('done')

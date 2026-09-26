@@ -82,24 +82,37 @@ func (d Deps) call(ctx context.Context, stepName, provider, model string,
 	return content, nil
 }
 
-// OCR 视觉 OCR 节点：工资单截图 → 结构化 JSON。
+// OCR 视觉 OCR 节点：工资单图片（一张或多张）→ 结构化 JSON。
 func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 	return func(ctx context.Context, s State) (State, error) {
 		st := d.stepCfg("ocr")
-		img, err := os.ReadFile(s.ImagePath)
-		if err != nil {
-			s.Err = err
-			return s, err
+		// 工资单支持多张图片：优先用 Pages（多图上传），回退单张 ImagePath（CLI / 单图路径）。
+		images := s.Pages
+		if len(images) == 0 && s.ImagePath != "" {
+			images = []string{s.ImagePath}
 		}
+		if len(images) == 0 {
+			s.Err = fmt.Errorf("未收到任何工资单图片")
+			return s, s.Err
+		}
+		// 全部图片作为多个 BinaryPart 放入同一条多模态消息，模型输出合并后的单份 JSON，
+		// 下游 translate/proofread/expert 无需感知图片数量。
+		parts := make([]llms.ContentPart, 0, len(images)+1)
+		for i, p := range images {
+			img, err := os.ReadFile(p)
+			if err != nil {
+				s.Err = fmt.Errorf("读取第 %d 张图片失败: %w", i+1, err)
+				return s, s.Err
+			}
+			parts = append(parts, llms.BinaryPart(mimeOf(p), img))
+		}
+		parts = append(parts, llms.TextPart(prompt.OCRUser))
 		messages := []llms.MessageContent{
 			llms.TextParts(llms.ChatMessageTypeSystem, prompt.OCRSystem),
 			{
 				// 多模态消息必须显式声明 role，否则 langchaingo 报 "role not supported"
-				Role: llms.ChatMessageTypeHuman,
-				Parts: []llms.ContentPart{
-					llms.BinaryPart(mimeOf(s.ImagePath), img),
-					llms.TextPart(prompt.OCRUser),
-				},
+				Role:  llms.ChatMessageTypeHuman,
+				Parts: parts,
 			},
 		}
 		text, err := d.call(ctx, "ocr", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)

@@ -2,22 +2,23 @@
 // 覆盖 ai.yml 步骤名：ocr / translate / proofread / expert / analyze。
 package prompt
 
-// OCRSystem 视觉 OCR：工资单截图 → 结构化 JSON。
-const OCRSystem = `你是一个专业的工资单 OCR 提取引擎。请从用户提供的工资单图片中提取结构化数据。
+// OCRSystem 视觉 OCR：工资单图片（一张或多张）→ 合并后的结构化 JSON。
+const OCRSystem = `你是一个专业的工资单 OCR 提取引擎。用户可能提供一张或多张工资单图片，请从中提取结构化数据并合并为一份结果。
 要求：
 1. 只输出一个 JSON 对象，不要输出任何解释、Markdown 代码块标记或多余文本。
 2. 只提取图片中真实可见的字段，绝对不要编造、推测或补全缺失字段。
-3. JSON 必须包含以下键（图片中不存在的键填 null）：
+3. 若提供了多张图片（如同一工资单的多联/多页/正反面），请合并为同一个 JSON：同一字段以内容更清晰、更完整的图片为准，各图的扣款明细分项合并去重，不要为每张图分别输出。
+4. JSON 必须包含以下键（图片中不存在的键填 null）：
    - employee_name: 员工姓名
    - tax_id: 税号
    - pay_period: 薪资周期（如 2024-05）
    - gross_salary: 税前工资
    - net_salary: 税后工资
    - deductions: 扣款明细数组，每项含 name 与 amount，图片中无扣款明细则为 []
-4. 金额保留原始数值与货币符号，不要换算。`
+5. 金额保留原始数值与货币符号，不要换算。`
 
 // OCRUser OCR 用户消息（与图片一同发送）。
-const OCRUser = `请提取这张工资单图片的结构化数据，严格按系统指令输出 JSON。`
+const OCRUser = `请提取这些工资单图片的结构化数据并合并为一份结果，严格按系统指令输出 JSON。`
 
 // TranslateSystem 翻译 OCR 结果。
 const TranslateSystem = `你是一个专业的财务文档翻译引擎。请将用户提供的工资单 JSON 内容翻译为英文。

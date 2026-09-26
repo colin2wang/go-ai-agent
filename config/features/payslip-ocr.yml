@@ -9,16 +9,16 @@
 # ============================================================================
 id: payslip-ocr
 name: 工资单 OCR 审读
-description: 上传工资单截图，自动完成 OCR 提取 → 翻译 → 审读校验 → 专家分析 → 汇总报告
+description: 上传工资单截图（可多张），自动完成 OCR 提取 → 翻译 → 审读校验 → 专家分析 → 汇总报告
 icon: receipt
 order: 1
 
-# ---- 输入声明（单文件）----
+# ---- 输入声明（支持多图）----
 input:
   kind: image
-  multiple: false
+  multiple: true
   accept: image/png,image/jpeg,image/webp
-  hint: 本地模型审读通常需要 1–5 分钟
+  hint: 可一次上传多张（多联/多页会合并为一份结果），也可 Ctrl+V 粘贴；本地模型审读通常需要 1–5 分钟
 
 # ---- 工作流声明 ----
 workflow:

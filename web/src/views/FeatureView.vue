@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
 import { runFeature } from '../api'
 import { duration, thousand } from '../chart'
@@ -64,17 +64,54 @@ function setFiles(list: File[]) {
   reset()
 }
 
+/**
+ * 追加语义：多选模式下点击选择、拖拽、多次 Ctrl+V 均累加图片（不覆盖已选的）；
+ * 单文件模式仍只保留本次的第一张。
+ */
+function addFiles(list: File[]) {
+  if (!list.length) return
+  setFiles(multiple.value ? [...files.value, ...list] : list.slice(0, 1))
+}
+
+/** 按 accept 白名单判断文件类型是否受理（支持 image/* 前缀与具体 MIME）。 */
+function acceptMatches(file: File): boolean {
+  const types = accept.value
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean)
+  if (!types.length) return file.type.startsWith('image/')
+  return types.some((t) =>
+    t.endsWith('/*') ? file.type.startsWith(t.slice(0, -1)) : file.type === t,
+  )
+}
+
+/**
+ * 全局粘贴：组件挂载期间监听 window 的 paste 事件，从剪贴板提取图片
+ * （按 accept 白名单过滤 MIME），自动重命名为「粘贴图片-N.png」后追加。
+ */
+function onPaste(e: ClipboardEvent) {
+  const imgs = Array.from(e.clipboardData?.files ?? []).filter(acceptMatches)
+  if (!imgs.length) return
+  e.preventDefault()
+  let n = files.value.length
+  const renamed = imgs.map((f) => {
+    n += 1
+    const ext = (f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')
+    // 剪贴板图片通常无有效文件名，统一按「粘贴图片-N」命名
+    return new File([f], `粘贴图片-${n}.${ext}`, { type: f.type })
+  })
+  addFiles(renamed)
+}
+
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
-  const list = Array.from(input.files ?? [])
-  setFiles(multiple.value ? list : list.slice(0, 1))
+  addFiles(Array.from(input.files ?? []))
   input.value = ''
 }
 
 function onDrop(e: DragEvent) {
   dragging.value = false
-  const list = Array.from(e.dataTransfer?.files ?? [])
-  if (list.length) setFiles(multiple.value ? list : list.slice(0, 1))
+  addFiles(Array.from(e.dataTransfer?.files ?? []))
 }
 
 function removeAt(index: number) {
@@ -134,7 +171,11 @@ function download() {
   URL.revokeObjectURL(url)
 }
 
-onBeforeUnmount(clearPreviews)
+onMounted(() => window.addEventListener('paste', onPaste))
+onBeforeUnmount(() => {
+  window.removeEventListener('paste', onPaste)
+  clearPreviews()
+})
 </script>
 
 <template>
@@ -164,8 +205,8 @@ onBeforeUnmount(clearPreviews)
     <div class="grid">
       <article class="card panel">
         <header class="card-head">
-          <p class="card-title">{{ multiple ? '上传页面' : '上传文件' }}</p>
-          <p class="card-sub">{{ multiple ? `已选 ${files.length} 页` : '单文件' }}</p>
+          <p class="card-title">{{ multiple ? '上传图片' : '上传文件' }}</p>
+          <p class="card-sub">{{ multiple ? `已选 ${files.length} 张` : '单文件' }}</p>
         </header>
 
         <label
@@ -184,7 +225,7 @@ onBeforeUnmount(clearPreviews)
           <template v-if="!files.length">
             <span class="drop-icon"><AppIcon name="upload" :size="22" /></span>
             <span class="drop-title">
-              {{ multiple ? '拖拽多张页面到此处，或点击选择' : '拖拽文件到此处，或点击选择' }}
+              {{ multiple ? '拖拽多张图片到此处，点击选择，或 Ctrl+V 粘贴' : '拖拽文件到此处，点击选择，或 Ctrl+V 粘贴' }}
             </span>
             <span class="drop-sub">{{ hint }}</span>
           </template>

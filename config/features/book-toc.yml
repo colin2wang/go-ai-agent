@@ -17,7 +17,7 @@ input:
   kind: image
   multiple: true            # 多页上传
   accept: image/png,image/jpeg,image/webp
-  hint: 支持一次选择多张目录页；建议按页码顺序选择
+  hint: 支持一次选择多张目录页（也可 Ctrl+V 粘贴）；建议按页码顺序选择
 
 # ---- 输出声明（模板渲染，用法类似 Java FreeMarker）----
 output:
