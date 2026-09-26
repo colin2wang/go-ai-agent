@@ -24,44 +24,17 @@ func Build(deps nodes.Deps) (*lggraph.StateRunnable, error) {
 	}
 }
 
-// buildPayslip 工资单审读（含条件边回退重试）：
+// buildPayslip 工资单提取合并（简化后仅 ocr 一步）：
 //
-//	entry → ocr(VLM) → translate → proofread →(条件边)→ expert → analyze → END
-//	                                    ↓(校验失败且未超重试上限) 回退重试 ocr
+//	entry → ocr(VLM) → END
 //
-// 重试上限取自子功能配置 workflow.max-retries（deps.MaxRetries）。
+// ocr 节点把每张截图的工资项目数据识别并合并为一份 JSON，不做解释/分析。
+// 如需审读/翻译/分析报告，在 payslip-ocr.yml 追加步骤并在此扩容图即可。
 func buildPayslip(deps nodes.Deps) (*lggraph.StateRunnable, error) {
-	maxRetries := deps.MaxRetries
-	if maxRetries <= 0 {
-		maxRetries = 2
-	}
 	g := lggraph.NewStateGraph()
 	g.AddNode("ocr", wrap(nodes.OCR(deps)))
-	g.AddNode("translate", wrap(nodes.Translate(deps)))
-	g.AddNode("proofread", wrap(nodes.Proofread(deps)))
-	g.AddNode("expert", wrap(nodes.Expert(deps)))
-	g.AddNode("analyze", wrap(nodes.Analyze(deps)))
 	g.SetEntryPoint("ocr")
-
-	g.AddEdge("ocr", "translate")
-	g.AddEdge("translate", "proofread")
-	g.AddConditionalEdge("proofread", func(ctx context.Context, state interface{}) string {
-		s, ok := state.(*nodes.State)
-		if !ok {
-			return "expert"
-		}
-		// proofread 失败或发现问题且未超上限 → 回退重试 ocr
-		if (s.Err != nil || len(s.ReviewNotes) > 0) && s.RetryCount["ocr"] < maxRetries {
-			if s.RetryCount == nil {
-				s.RetryCount = map[string]int{}
-			}
-			s.RetryCount["ocr"]++
-			return "ocr"
-		}
-		return "expert"
-	})
-	g.AddEdge("expert", "analyze")
-	g.AddEdge("analyze", lggraph.END)
+	g.AddEdge("ocr", lggraph.END)
 
 	return g.Compile()
 }

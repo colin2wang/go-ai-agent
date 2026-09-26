@@ -116,9 +116,10 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			}
 			parts = append(parts, llms.ImageURLContent{URL: imageDataURL(mimeOf(p), img)})
 		}
-		parts = append(parts, llms.TextPart(prompt.OCRUser))
+		sys, usr := d.stepPrompt("ocr")
+		parts = append(parts, llms.TextPart(usr))
 		messages := []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeSystem, prompt.OCRSystem),
+			llms.TextParts(llms.ChatMessageTypeSystem, sys),
 			{
 				// 多模态消息必须显式声明 role，否则 langchaingo 报 "role not supported"
 				Role:  llms.ChatMessageTypeHuman,
@@ -131,9 +132,32 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			return s, err
 		}
 		s.OCRText = text
+		s.FinalReport = text // 提取+合并后的结果即最终输出（无后续分析/报告节点）
+		// 尽力把 OCR JSON 解析到 Structured，供前端结构化展示（失败不影响主流程）。
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(stripJSONFence(text)), &fields); err == nil {
+			s.Structured = fields
+		}
 		s.Err = nil
 		return s, nil
 	}
+}
+
+// stepPrompt 返回步骤的系统/用户提示词：优先用 yml 的 system-prompt/user-prompt，
+// 缺失时回退 internal/prompt 的内置默认（prompt.Defaults）。
+func (d Deps) stepPrompt(name string) (system, user string) {
+	st := d.stepCfg(name)
+	system, user = st.SystemPrompt, st.UserPrompt
+	if system == "" || user == "" {
+		defSys, defUsr := prompt.Defaults(name)
+		if system == "" {
+			system = defSys
+		}
+		if user == "" {
+			user = defUsr
+		}
+	}
+	return
 }
 
 // Translate 翻译节点：复用同一工厂，仅切换 provider+model+prompt。

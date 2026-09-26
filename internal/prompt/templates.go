@@ -3,22 +3,64 @@
 package prompt
 
 // OCRSystem 视觉 OCR：工资单图片（一张或多张）→ 合并后的结构化 JSON。
-const OCRSystem = `你是一个专业的工资单 OCR 提取引擎。用户可能提供一张或多张工资单图片，请从中提取结构化数据并合并为一份结果。
+// 按固定字段清单逐项识别并跨截图合并，严禁解释、分析、评价或翻译。
+const OCRSystem = `你是一个工资单信息提取引擎。用户会提供一张或多张工资单截图。
+任务：识别每张截图中下列「工资项目」的数据，并将多张结果合并为一份 JSON。
 要求：
 1. 只输出一个 JSON 对象，不要输出任何解释、Markdown 代码块标记或多余文本。
 2. 只提取图片中真实可见的字段，绝对不要编造、推测或补全缺失字段。
-3. 若提供了多张图片（如同一工资单的多联/多页/正反面），请合并为同一个 JSON：同一字段以内容更清晰、更完整的图片为准，各图的扣款明细分项合并去重，不要为每张图分别输出。
-4. JSON 必须包含以下键（图片中不存在的键填 null）：
-   - employee_name: 员工姓名
-   - tax_id: 税号
-   - pay_period: 薪资周期（如 2024-05）
-   - gross_salary: 税前工资
-   - net_salary: 税后工资
-   - deductions: 扣款明细数组，每项含 name 与 amount，图片中无扣款明细则为 []
-5. 金额保留原始数值与货币符号，不要换算。`
+3. 严格按下表输出，每个字段使用给出的英文 key：
+   - employee_id: ID（工号/员工编号）
+   - should_attend_days: 应出勤天数
+   - actual_attend_days: 实际出勤天数
+   - base_salary: 基本工资
+   - post_allowance: 岗位津贴
+   - salary_grade: 薪级工资
+   - full_attendance_bonus: 全勤奖励
+   - comprehensive_salary: 综合工资
+   - monthly_salary: 月度工资
+   - overtime_subsidy: 加班补贴（含值班）
+   - leave_days: 请假天数
+   - leave_deduction: 请假扣款
+   - meal_subsidy: 餐补
+   - communication_subsidy: 通讯补贴
+   - performance_subsidy: 绩效补贴
+   - transport_subsidy: 交通补贴
+   - high_temp_subsidy: 高温补贴
+   - childrens_day_benefit: 六一子女福利
+   - other_deduction: 扣款
+   - subsidy_salary: 补贴工资
+   - gross_salary: 应发工资
+   - net_salary: 实发工资
+   - withhold_union: 代扣工会费
+   - withhold_social_housing: 代扣社保+公积金
+   - withhold_income_tax: 代扣个税
+   （若截图中出现「员工姓名」，可一并提取到 employee_name 字段）
+   数值规则：金额提取为数字（保留原始数值，不换算、不附加货币符号，去掉千分位逗号，如「¥15,330.75」→ 15330.75）；天数提取为数字；文本原样提取。
+4. 工资单可能分多张截图，单张不一定包含所有项目：把各张截图里出现的字段合并到同一个 JSON；同一字段若出现在多张截图中，以内容更清晰、更完整的为准；不要为每张图分别输出。
+5. 任何字段在所有截图中均未出现则填 null。
+6. 严禁对数据做任何解释、分析、评价或翻译，只输出提取与合并后的 JSON。`
 
 // OCRUser OCR 用户消息（与图片一同发送）。
-const OCRUser = `请提取这些工资单图片的结构化数据并合并为一份结果，严格按系统指令输出 JSON。`
+const OCRUser = `请识别这些工资单截图中的上述工资项目数据并合并为一份结果，严格按系统指令只输出 JSON。`
+
+// Defaults 返回某步骤的内置默认提示词（yml 未覆盖时回退）。
+// system 为系统提示词；user 为用户提示词（多数步骤以状态字段作为 human 消息，故为空）。
+func Defaults(name string) (system, user string) {
+	switch name {
+	case "ocr":
+		return OCRSystem, OCRUser
+	case "translate":
+		return TranslateSystem, ""
+	case "proofread":
+		return ProofreadSystem, ""
+	case "expert":
+		return ExpertSystem, ""
+	case "analyze":
+		return AnalyzeSystem, ""
+	}
+	return "", ""
+}
 
 // TranslateSystem 翻译 OCR 结果。
 const TranslateSystem = `你是一个专业的财务文档翻译引擎。请将用户提供的工资单 JSON 内容翻译为英文。

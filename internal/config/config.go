@@ -174,12 +174,14 @@ type Provider struct {
 	MaxTokens             int    `yaml:"max-tokens"`
 }
 
-// Step 单个工作流步骤的配置：引用 provider + 模型 + 提示词模板 + 覆盖参数。
+// Step 单个工作流步骤的配置：引用 provider + 模型 + 提示词 + 覆盖参数。
 type Step struct {
 	Provider         string   `yaml:"provider"`
 	Model            string   `yaml:"model"`
-	PromptTemplate   string   `yaml:"prompt-template"`
-	Temperature      *float64 `yaml:"temperature"` // 指针：区分「未设置」与 0
+	PromptTemplate   string   `yaml:"prompt-template"` // 预留：内置模板名
+	SystemPrompt     string   `yaml:"system-prompt"`   // 系统提示词（直接写在 yml，优先于内置模板）
+	UserPrompt       string   `yaml:"user-prompt"`     // 用户提示词（直接写在 yml，缺省回退内置默认）
+	Temperature      *float64 `yaml:"temperature"`     // 指针：区分「未设置」与 0
 	MaxTokens        int      `yaml:"max-tokens"`
 	ReasoningEnabled *bool    `yaml:"reasoning-enabled"` // nil = 回退全局
 }
@@ -204,6 +206,12 @@ func (s Step) WithDefaults(def Step) Step {
 	}
 	if out.ReasoningEnabled == nil {
 		out.ReasoningEnabled = def.ReasoningEnabled
+	}
+	if out.SystemPrompt == "" {
+		out.SystemPrompt = def.SystemPrompt
+	}
+	if out.UserPrompt == "" {
+		out.UserPrompt = def.UserPrompt
 	}
 	return out
 }
