@@ -43,6 +43,10 @@ ai:
 
 # ---- 子功能注册表（左侧菜单顺序 = 列表顺序；order 用于同组内排序）----
 features:
+  - id: chat
+    enabled: true
+    config: features/chat.yml
+
   - id: payslip-ocr
     enabled: true
     config: features/payslip-ocr.yml
@@ -50,7 +54,3 @@ features:
   - id: book-toc
     enabled: true
     config: features/book-toc.yml
-
-  - id: chat
-    enabled: true
-    config: features/chat.yml

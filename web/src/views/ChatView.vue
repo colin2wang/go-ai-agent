@@ -231,7 +231,15 @@ watch(
     if (!p || !m) return
     probingCaps.value = true
     try {
-      probedCaps.value = await fetchModelCaps(p, m)
+      const caps = await fetchModelCaps(p, m)
+      probedCaps.value = caps
+      // 同步刷新下拉列表里该模型的后缀，避免「顶部标签（真实探测）与下拉项
+      // （拉取列表时的启发式）对同一模型给出矛盾结论」。
+      const entry = models.value.find((x) => x.id === m)
+      if (entry && caps.model === m) {
+        entry.vision = caps.vision
+        entry.reasoning = caps.reasoning
+      }
     } catch {
       // 探测失败不阻塞对话：保持列表启发式结论
     } finally {
@@ -474,6 +482,13 @@ onBeforeUnmount(() => {
               title="端点元数据与模型名均未声明特殊能力（启发式判定，仅供参考）"
             >
               纯文本
+            </span>
+            <span
+              v-if="probingCaps"
+              class="cap-chip probing"
+              title="正在向端点真实探测视觉 / 推理 / 流式能力…"
+            >
+              探测中…
             </span>
           </span>
         </span>
@@ -807,6 +822,23 @@ onBeforeUnmount(() => {
   color: var(--text-3);
   background: var(--surface-2);
   border-color: var(--border);
+}
+
+.cap-chip.probing {
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-color: var(--border);
+  animation: cap-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes cap-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .stream-field {

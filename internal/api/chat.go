@@ -17,6 +17,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -344,19 +347,42 @@ func (s *Server) handleChatStreamCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// probeTinyPNG 1×1 透明 PNG（最小合法图片，用于视觉能力真实调用探测）。
-const probeTinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+// probeVisionColorWords 探测用纯色图（品红/magenta 系）的可接受答案词（小写匹配）。
+// 刻意排除「红/蓝/绿/黑/白/黄」等盲猜高频词：只有真正「看懂」图片的模型才可能
+// 答出品红/紫/粉这一色系，纯文本模型忽略图片后无从得知，借此消除「端点收下
+// image 片段却并不具备视觉能力」的假阳性。
+var probeVisionColorWords = []string{
+	"品红", "洋红", "玫红", "紫", "粉", "magenta", "fuchsia", "purple", "pink",
+}
 
-// probeVision 真实调用一次多模态请求（1×1 PNG + 文本）判定视觉能力：
-// HTTP 200 且返回 choices 即认为接受图像输入；4xx/5xx 视为不支持。
+// solidColorPNGBase64 生成一张 256×256 纯色 PNG 并返回纯 base64（不含 data: 前缀）。
+// 纯色图经 PNG 无损压缩后体积极小，适合内联进探测请求。
+func solidColorPNGBase64(r, g, b uint8) string {
+	const sz = 256
+	img := image.NewRGBA(image.Rect(0, 0, sz, sz))
+	c := color.RGBA{R: r, G: g, B: b, A: 255}
+	for y := 0; y < sz; y++ {
+		for x := 0; x < sz; x++ {
+			img.Set(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img) // 内存编码不会失败
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+// probeVision 真实调用一次多模态请求判定视觉能力：发送一张品红纯色图，
+// 仅当模型回答命中该色系时才认定具备视觉（可判别，消除假阳性）。
+// 返回 (视觉, 探测错误)：探测错误非空表示端点未正常应答（拒绝图片/出错/响应异常），
+// 调用方应回退名字/元数据启发式；错误为空表示探测成功，视觉结论以回答内容为准。
 func probeVision(ctx context.Context, client *http.Client, p config.Provider, model string) (bool, string) {
 	payload := chatUpstream{
 		Model: model,
 		Messages: []chatWireMessage{{
 			Role: "user",
 			Content: []chatPart{
-				{Type: "image_url", ImageURL: &chatImageURL{URL: "data:image/png;base64," + probeTinyPNG}},
-				{Type: "text", Text: "图中是什么？用不超过5个字回答。"},
+				{Type: "image_url", ImageURL: &chatImageURL{URL: "data:image/png;base64," + solidColorPNGBase64(255, 0, 255)}},
+				{Type: "text", Text: "这是一张纯色图片。请只回答它的颜色名称（一个词），不要解释或添加其他文字。"},
 			},
 		}},
 		MaxTokens: 32,
@@ -374,7 +400,13 @@ func probeVision(ctx context.Context, client *http.Client, p config.Provider, mo
 	if json.Unmarshal(body, &out) != nil || len(out.Choices) == 0 {
 		return false, "响应缺少 choices"
 	}
-	return true, ""
+	answer := strings.ToLower(out.Choices[0].Message.Content)
+	for _, w := range probeVisionColorWords {
+		if strings.Contains(answer, w) {
+			return true, ""
+		}
+	}
+	return false, ""
 }
 
 // probeReasoning 非流式调用一次，检查 reasoning_content / reasoning_tokens
@@ -426,41 +458,29 @@ func (s *Server) probeModelCaps(ctx context.Context, p config.Provider, model st
 	client := s.factory.HTTPClient(p)
 	client.Timeout = 30 * time.Second
 
+	// 启发式（名字/元数据）先算好：视觉真实探测与已知 VL 名取并集，避免把
+	// 真视觉模型因“回答未命中颜色词”误判为非视觉；推理回退时也用得到。
+	hv, hr := detectModelCaps(model, nil)
+
 	caps := modelCaps{ProbedAt: time.Now().Format(time.RFC3339)}
-	var visionOK, visionErr = probeVision(ctx, client, p, model)
+	visionOK, visionErr := probeVision(ctx, client, p, model)
 	if visionErr == "" {
-		caps.Vision, caps.ProbedVLM = visionOK, true
+		// 探测成功：以“是否真看懂图片”为准，已知 VL 名保底为视觉。
+		caps.Vision, caps.ProbedVLM = visionOK || hv, true
+	} else {
+		caps.Vision = hv // 端点拒绝图片/出错，回退启发式
 	}
-	var reasonOK, reasonErr = probeReasoning(ctx, client, p, model)
+	reasonOK, reasonErr := probeReasoning(ctx, client, p, model)
 	if reasonErr == "" {
 		caps.Reasoning, caps.ProbedJSON = reasonOK, true
+	} else {
+		caps.Reasoning = hr
 	}
 	caps.Stream, caps.StreamNote = probeStream(ctx, client, p, model)
 
-	// 探测未覆盖或失败的维度回退启发式（元数据缺失时 entry 传 nil）
-	hv, hr := detectModelCaps(model, nil)
-	caps.HeuristicOK = true
-	if !caps.ProbedVLM {
-		caps.Vision = hv
-	}
-	if !caps.ProbedJSON {
-		caps.Reasoning = hr
-	}
-	for _, e := range []error{errOrNil(visionErr), errOrNil(reasonErr)} {
-		if e != nil {
-			caps.HeuristicOK = false
-			break
-		}
-	}
+	// 两项真实探测均成功→ HeuristicOK=true；任一探测未能完成→ false（结论含启发成分）。
+	caps.HeuristicOK = visionErr == "" && reasonErr == ""
 	return caps
-}
-
-// errOrNil 空串→nil（用于统一判断探测是否出错）。
-func errOrNil(msg string) error {
-	if msg == "" {
-		return nil
-	}
-	return errors.New(msg)
 }
 
 // probeMu 串行化探测：避免并发请求同一未缓存模型时重复打端点。

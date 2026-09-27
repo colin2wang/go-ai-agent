@@ -15,7 +15,7 @@ defineEmits<{ (e: 'select', id: string): void }>()
 <template>
   <aside class="sidebar">
     <div class="brand">
-      <span class="brand-mark"><AppIcon name="spark" :size="17" /></span>
+      <span class="brand-mark"><img src="/favicon.svg" alt="" width="34" height="34" /></span>
       <span class="brand-text">
         <span class="brand-title">{{ app.title || 'AI 工作流平台' }}</span>
         <span class="brand-sub">{{ app.name || 'go-ai-agent' }}</span>
@@ -84,9 +84,14 @@ defineEmits<{ (e: 'select', id: string): void }>()
   width: 34px;
   height: 34px;
   border-radius: 11px;
-  background: #1d1d1f;
-  color: #fff;
+  overflow: hidden;
   flex: none;
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand-text {

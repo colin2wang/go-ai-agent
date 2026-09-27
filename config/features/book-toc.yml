@@ -10,7 +10,7 @@ id: book-toc
 name: 图书目录识别
 description: 上传扫描版图书目录页（可多页），自动 OCR、跨页合并校对，并按模板生成文字版目录
 icon: book
-order: 2
+order: 3
 
 # ---- 输入声明（前端据此渲染上传控件）----
 input:

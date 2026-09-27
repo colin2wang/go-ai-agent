@@ -80,6 +80,13 @@ pnpm install failed.
     New-Item -ItemType Directory -Force -Path $embedDir | Out-Null
     Get-ChildItem -Force -Path $embedDir -Exclude index.html | Remove-Item -Recurse -Force
     Copy-Item (Join-Path $feDist "*") -Destination $embedDir -Recurse -Force
+    # Ensure the site icon is baked in: vite copies web/public/favicon.svg to
+    # web/dist root, but if that step was ever skipped, fall back to the source
+    # so the embedded index.html's <link rel="icon" href="/favicon.svg"> resolves.
+    if (-not (Test-Path (Join-Path $embedDir "favicon.svg"))) {
+        $iconSrc = Join-Path $PSScriptRoot "web/public/favicon.svg"
+        if (Test-Path $iconSrc) { Copy-Item $iconSrc -Destination (Join-Path $embedDir "favicon.svg") -Force }
+    }
     Write-Host "==> embedded web/dist -> internal/api/webdist" -ForegroundColor Cyan
 }
 

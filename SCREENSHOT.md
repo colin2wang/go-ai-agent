@@ -8,6 +8,12 @@ Web UI 界面截图（`http://localhost:8000/`）。
 
 ![概览仪表盘](docs/screenshot/overview-dashboard.png)
 
+## AI聊天
+
+选择端点与模型进行多轮对话，默认流式显示回复（自动探测端点流式能力），支持思考链展示与视觉模型图片上传。
+
+![AI聊天](docs/screenshot/chat.png)
+
 ## 工资单 OCR 审读
 
 上传工资单截图，自动完成 OCR 提取 → 翻译 → 审读校验 → 专家分析 → 汇总报告。
