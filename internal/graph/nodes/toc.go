@@ -12,10 +12,12 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
 
+	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/tmpl"
 )
 
@@ -43,6 +45,8 @@ type tocPayload struct {
 }
 
 // TocOCR 逐页 OCR：每张扫描页 → 该页的目录条目 JSON。
+// d.Parallel>=2 时多页并发请求（结果仍按页序汇总），provider 并发闸门在 call 层生效；
+// 每页完成时通过进度回调上报“第 n/m 页”，供异步任务 SSE/轮询展示。
 func TocOCR(d Deps) func(ctx context.Context, s State) (State, error) {
 	return func(ctx context.Context, s State) (State, error) {
 		st := d.stepCfg("ocr")
@@ -55,44 +59,40 @@ func TocOCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			return s, s.Err
 		}
 
-		outs := make([]string, 0, len(pages))
+		outs := make([]string, len(pages))
+		var (
+			mu      sync.Mutex
+			wg      sync.WaitGroup
+			errOnce sync.Once
+			firstEr error
+			done    int
+		)
+		sem := make(chan struct{}, max(d.Parallel, 1))
 		for i, p := range pages {
-			img, err := os.ReadFile(p)
-			if err != nil {
-				s.Err = fmt.Errorf("读取第 %d 页失败: %w", i+1, err)
-				return s, s.Err
-			}
-			sys, usr := d.stepPrompt("ocr")
-			messages := []llms.MessageContent{
-				llms.TextParts(llms.ChatMessageTypeSystem, sys),
-				// langchaingo v0.1.14 会把 BinaryPart 序列化为其私有 {"type":"binary"} 格式，
-				// LM Studio 等端点不识别导致图片被静默忽略、模型空回答。
-				// 这里直接构造标准 OpenAI image_url（data URL），与 chat 路径的 wire 格式一致。
-				{
-					// 多模态消息必须显式声明 role，否则 langchaingo 报 "role not supported"
-					Role: llms.ChatMessageTypeHuman,
-					Parts: []llms.ContentPart{
-						llms.ImageURLContent{URL: imageDataURL(mimeOf(p), img)},
-						llms.TextPart(usr),
-					},
-				},
-			}
-			text, err := d.call(ctx, "ocr", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
-			if err != nil {
-				s.Err = fmt.Errorf("第 %d 页 OCR 失败: %w", i+1, err)
-				return s, s.Err
-			}
-			// 空回答不立即失败，保留到 merge 阶段回退合并时统一裁决
-			if strings.TrimSpace(text) == "" {
-				slog.Warn("toc ocr 空回答",
-					slog.Int("page", i+1), slog.String("provider", st.Provider), slog.String("model", st.Model))
-			} else {
-				slog.Info("toc ocr 完成",
-					slog.Int("page", i+1),
-					slog.Int("answer_chars", len([]rune(text))),
-					slog.String("preview", onelinePreview(text)))
-			}
-			outs = append(outs, text)
+			wg.Add(1)
+			go func(i int, p string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				text, err := d.tocOCPage(ctx, st, i, p)
+				if err != nil {
+					// 保留错误到汇总阶段统一裁决（不中断其余页，已发起的调用不浪费）
+					errOnce.Do(func() { firstEr = fmt.Errorf("第 %d 页 OCR 失败: %w", i+1, err) })
+					return
+				}
+				mu.Lock()
+				outs[i] = text
+				done++
+				cur := done
+				mu.Unlock()
+				d.report("ocr", cur, len(pages), fmt.Sprintf("第 %d 页完成", i+1))
+			}(i, p)
+		}
+		wg.Wait()
+		if firstEr != nil {
+			s.Err = firstEr
+			return s, s.Err
 		}
 
 		s.PageOCR = outs
@@ -100,6 +100,44 @@ func TocOCR(d Deps) func(ctx context.Context, s State) (State, error) {
 		s.Err = nil
 		return s, nil
 	}
+}
+
+// tocOCPage 单页提取：读图 → 构造多模态消息 → 调用 LLM，返回该页原始输出。
+func (d Deps) tocOCPage(ctx context.Context, st config.Step, index int, path string) (string, error) {
+	img, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("读取第 %d 页失败: %w", index+1, err)
+	}
+	sys, usr := d.stepPrompt("ocr")
+	messages := []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, sys),
+		// langchaingo v0.1.14 会把 BinaryPart 序列化为其私有 {"type":"binary"} 格式，
+		// LM Studio 等端点不识别导致图片被静默忽略、模型空回答。
+		// 这里直接构造标准 OpenAI image_url（data URL），与 chat 路径的 wire 格式一致。
+		{
+			// 多模态消息必须显式声明 role，否则 langchaingo 报 "role not supported"
+			Role: llms.ChatMessageTypeHuman,
+			Parts: []llms.ContentPart{
+				llms.ImageURLContent{URL: imageDataURL(mimeOf(path), img)},
+				llms.TextPart(usr),
+			},
+		},
+	}
+	text, err := d.call(ctx, "ocr", st.Provider, st.Model, messages, st.Temp(), st.MaxTokens)
+	if err != nil {
+		return "", err
+	}
+	// 空回答不立即失败，保留到 merge 阶段回退合并时统一裁决
+	if strings.TrimSpace(text) == "" {
+		slog.Warn("toc ocr 空回答",
+			slog.Int("page", index+1), slog.String("provider", st.Provider), slog.String("model", st.Model))
+	} else {
+		slog.Info("toc ocr 完成",
+			slog.Int("page", index+1),
+			slog.Int("answer_chars", len([]rune(text))),
+			slog.String("preview", onelinePreview(text)))
+	}
+	return text, nil
 }
 
 // TocMerge 跨页合并：先由 LLM 校对去重排序，未返回合法结果时回退逐页确定性合并。

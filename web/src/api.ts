@@ -32,10 +32,47 @@ export function fetchOverview(days = 14): Promise<OverviewResponse> {
 }
 
 /**
- * 执行指定子功能工作流。
- * 单文件用 file 字段，多页（如扫描版图书目录）用 files 字段，后端同时兼容。
+ * 查询任务（异步模式轮询用）。
  */
-export async function runFeature(id: string, files: File | File[]): Promise<JobResult> {
+export async function fetchJob(id: string): Promise<JobResult> {
+  return getJSON<JobResult>(`/api/jobs/${encodeURIComponent(id)}`)
+}
+
+/** 异步任务轮询默认间隔 ms（本地推理任务秒级变化，2s 足够且不打扰后端） */
+const JOB_POLL_MS = 2000
+
+/**
+ * 执行指定子功能工作流（异步）。
+ * 后端 accept 202 返回 job_id + processing：随后轮询 /api/jobs/{id}，
+ * 每次进度更新回调 onProgress，直到 done/failed 返回终态。
+ * 后端未开异步时直接返回完成态（与旧版同步行为兼容，不轮询）。
+ */
+export async function runFeatureAsync(
+  id: string,
+  files: File | File[],
+  onProgress?: (job: JobResult) => void,
+): Promise<JobResult> {
+  const first = await runFeature(id, files)
+  if (first.status === 'done' || first.status === 'failed') return first
+  onProgress?.(first)
+  for (;;) {
+    await new Promise((r) => setTimeout(r, JOB_POLL_MS))
+    const job = await fetchJob(first.job_id)
+    onProgress?.(job)
+    if (job.status === 'done' || job.status === 'failed') return job
+  }
+}
+
+/**
+ * 执行指定子功能工作流（同步等待，兼容旧行为）。
+ * 单文件用 file 字段，多页（如扫描版图书目录）用 files 字段，后端同时兼容。
+ * signal 支持中断等待（仅断开本次请求，后台异步任务不受影响）。
+ */
+export async function runFeature(
+  id: string,
+  files: File | File[],
+  opts?: { async?: boolean; signal?: AbortSignal },
+): Promise<JobResult> {
   const list = Array.isArray(files) ? files : [files]
   const form = new FormData()
   if (list.length > 1) {
@@ -43,12 +80,14 @@ export async function runFeature(id: string, files: File | File[]): Promise<JobR
   } else {
     form.append('file', list[0])
   }
-  const res = await fetch(`/api/features/${encodeURIComponent(id)}/run`, {
+  const q = opts?.async === true ? '?async=1' : opts?.async === false ? '?async=0' : ''
+  const res = await fetch(`/api/features/${encodeURIComponent(id)}/run${q}`, {
     method: 'POST',
     body: form,
+    signal: opts?.signal,
   })
   const data: unknown = await res.json()
-  if (!res.ok) {
+  if (!res.ok && res.status !== 202) {
     throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
   }
   return data as JobResult

@@ -25,13 +25,28 @@ server:
   open-browser: true              # 启动后自动打开浏览器
   read-header-timeout-seconds: 10
   shutdown-timeout-seconds: 5
+  # 对外调用令牌（仅保护 /api/*，前端页面不受影响）：为空 = 不鉴权（本机单用户默认）。
+  # 第三方系统调用时带任一头：Authorization: Bearer <token> 或 X-API-Key: <token>
+  api-tokens: []                  # 例：["harness-3f9c3e0f"]；生产建议同时配合环境变量注入
+  auth-exclude-health: false      # true = /api/health 豁免鉴权（供存活探测用）
 
-# ---- 存储：LLM 调用统计（SQLite，纯 Go 无 CGO）----
+# ---- 存储：LLM 调用统计与任务/缓存（同一 SQLite 文件，纯 Go 无 CGO）----
 storage:
   enabled: true
   db-path: ./database/go-ai-agent.db   # 目录不存在自动创建
-  retention-days: 30                   # 流水保留期，过期自动清理
+  retention-days: 30                   # 流水/任务保留期，过期自动清理
   queue-capacity: 10000                # 异步写队列容量（满则丢弃，不阻塞调用链）
+  persist-jobs: true                   # 工作流改为异步任务：上传立即返回 job_id，前端轮询进度（重启后仍可查）
+  caps-ttl-hours: 24                   # 模型能力探测结果的有效期（重启免重测，过期重测）
+  prune-interval-minutes: 60           # 过期任务/缓存/探测行的后台清理周期
+
+# ---- LLM 结果缓存：相同 provider+模型+消息+参数 命中即不再请求端点 ----
+# 对 OCR/提取类确定性任务收益最大；复用 storage 的 SQLite（需 storage.enabled）。
+cache:
+  enabled: true
+  ttl-hours: 24                   # 缓存有效期（过期后下次真实重调）
+  max-rows: 2000                  # 缓存行数上限（超出按写入时间淘汰最旧）
+  keep-on-error: false            # 空回答是否也入缓存（默认 false：下次仍真实重试）
 
 # ---- 日志级别：debug | info | warn | error ----
 logging:

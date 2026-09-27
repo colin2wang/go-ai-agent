@@ -6,15 +6,22 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	_ "image/gif"
 	"image/jpeg"
 	"image/png"
+	"log/slog"
+	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tmc/langchaingo/llms"
 
@@ -50,12 +57,36 @@ type Deps struct {
 	Stream  bool
 	// MaxRetries 条件边回退重试上限（来自子功能 workflow.max-retries）。
 	MaxRetries int
+	// RetryMax / RetryBackoffMS 单次调用内的重试与指数退避（限流/5xx 才重试）。
+	RetryMax       int
+	RetryBackoffMS int
 	// Workflow 工作流类型（来自子功能 workflow.type），供编排层选择图。
 	Workflow string
+	// Parallel 逐页并发度（>=2 时多页 OCR 并发执行，结果仍按页序汇总）。
+	Parallel int
+	// CacheEnabled 本次工作流的步骤是否默认参与 LLM 结果缓存。
+	CacheEnabled bool
+	// NoCacheSteps 显式声明 cache: false 的步骤名集合（在 CacheEnabled=true 时排除这些步骤）。
+	NoCacheSteps map[string]bool
+	// Progress 进度回调（异步任务向 SSE 推送“第 n/m 页”），可为 nil。
+	Progress func(step string, done, total int, detail string)
 	// Template 模板引擎（本地渲染步骤使用，可为 nil）。
 	Template *tmpl.Engine
 	// Output 输出声明（模板名 / 外部模板目录 / 扩展名）。
 	Output config.Output
+}
+
+// report 上报一次步骤进度（无回调时 no-op）。
+func (d Deps) report(step string, done, total int, detail string) {
+	if d.Progress == nil {
+		return
+	}
+	if detail == "" {
+		detail = fmt.Sprintf("%s %d/%d", step, done, total)
+	} else {
+		detail = fmt.Sprintf("%s %d/%d：%s", step, done, total, detail)
+	}
+	d.Progress(step, done, total, detail)
 }
 
 // stepCfg 返回节点对应的步骤配置（未单独声明则回退 Default）。
@@ -64,6 +95,8 @@ func (d Deps) stepCfg(name string) config.Step {
 }
 
 // call 封装一次 LLM 调用：取客户端 → 组装选项 → GenerateContent，返回回答文本。
+// 调用前后受 provider 并发闸门约束（避免本地端点被并发打爆），失败时按
+// 退避策略重试：仅对限流/5xx/网络类错误重试，4xx 参数错误直接返回。
 func (d Deps) call(ctx context.Context, stepName, provider, model string,
 	messages []llms.MessageContent, temperature float64, maxTokens int) (string, error) {
 
@@ -71,6 +104,43 @@ func (d Deps) call(ctx context.Context, stepName, provider, model string,
 	if err != nil {
 		return "", err
 	}
+	if d.cacheForStep(stepName) {
+		ctx = llm.WithCacheEnabled(ctx, true)
+	}
+
+	attempts := d.RetryMax
+	if attempts < 0 {
+		attempts = 0
+	}
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		text, err := d.callOnce(ctx, chat, stepName, messages, temperature, maxTokens)
+		if err == nil {
+			return text, nil
+		}
+		lastErr = err
+		if attempt >= attempts || !retryableErr(err) {
+			return "", lastErr
+		}
+		slog.Warn("步骤调用失败，准备重试",
+			slog.String("step", stepName), slog.Int("attempt", attempt+1),
+			slog.Int("max", attempts), slog.String("error", err.Error()))
+		if !sleepBackoff(ctx, d.RetryBackoffMS, attempt) {
+			return "", lastErr // 等待期间 ctx 取消，不再重试
+		}
+	}
+}
+
+// callOnce 单次实际调用（含 provider 并发闸门）。
+func (d Deps) callOnce(ctx context.Context, chat llm.Model, stepName string,
+	messages []llms.MessageContent, temperature float64, maxTokens int) (string, error) {
+
+	release, err := d.Factory.Acquire(ctx, d.stepProvider(stepName))
+	if err != nil {
+		return "", fmt.Errorf("step %s 等待并发额度: %w", stepName, err)
+	}
+	defer release()
+
 	acc := &llm.StreamAccumulator{}
 	opts := llm.StreamOptions(d.Stream, acc, temperature, maxTokens)
 	resp, err := chat.GenerateContent(ctx, messages, opts...)
@@ -88,7 +158,81 @@ func (d Deps) call(ctx context.Context, stepName, provider, model string,
 	return content, nil
 }
 
+// cacheForStep 该步骤是否参与结果缓存：全局开启且未被步骤级 cache:false 排除。
+func (d Deps) cacheForStep(stepName string) bool {
+	return d.CacheEnabled && !d.NoCacheSteps[stepName]
+}
+
+// stepProvider 返回该步骤最终生效的 provider 名（限流闸门按它分组）。
+func (d Deps) stepProvider(stepName string) string {
+	return d.stepCfg(stepName).Provider
+}
+
+// httpStatusRe 从错误文本中提取端点返回的 HTTP 状态码（langchaingo 不包装状态码，
+// 但错误消息普遍形如 "error, status code: 429"，据此区分限流/服务端/参数错误）。
+var httpStatusRe = regexp.MustCompile(`status code:?\s*(\d{3})`)
+
+// retryableErr 判断是否值得重试：网络/超时与 408/429/5xx 可重试，其余 4xx 立即失败。
+func retryableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false // 调用方主动取消
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	m := strings.ToLower(err.Error())
+	if code := errorCode(m); code > 0 {
+		return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
+	}
+	// 无状态码的连接层错误（拒绝连接/DNS/读超时）对本地端点重启场景值得再试
+	for _, hint := range []string{"connection refused", "connection reset", "eof", "timeout", "no such host", "temporarily unavailable"} {
+		if strings.Contains(m, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+// errorCode 提取错误文本中的 HTTP 状态码，不存在返回 0。
+func errorCode(m string) int {
+	g := httpStatusRe.FindStringSubmatch(m)
+	if len(g) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(g[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// sleepBackoff 指数退避（base × 2^attempt，上限 30s，带 ±25% 抖动）；
+// ctx 提前取消时返回 false。base<=0 时不等待（保持旧行为：立即重试）。
+func sleepBackoff(ctx context.Context, baseMS, attempt int) bool {
+	if baseMS <= 0 {
+		return ctx.Err() == nil
+	}
+	d := time.Duration(baseMS) * time.Millisecond * time.Duration(1<<min(attempt, 5))
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	d += time.Duration(rand.Int63n(int64(d)/4+1)) - d/8 // 抖动，避免并发页同时重试踩同一坑
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // OCR 视觉 OCR 节点：工资单图片（一张或多张）→ 结构化 JSON。
+// 全部图片放进同一条多模态消息，模型输出合并后的单份结果，
+// 下游步骤无需感知图片数量（与逐页并发的 OCRPage 区分）。
 func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 	return func(ctx context.Context, s State) (State, error) {
 		st := d.stepCfg("ocr")
@@ -101,6 +245,7 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			s.Err = fmt.Errorf("未收到任何工资单图片")
 			return s, s.Err
 		}
+		d.report("ocr", 0, 1, fmt.Sprintf("%d 张图片", len(images)))
 		// 全部图片放入同一条多模态消息，模型输出合并后的单份 JSON，
 		// 下游 translate/proofread/expert 无需感知图片数量。
 		// 注意：不能用 BinaryPart——langchaingo v0.1.14 会把它序列化为私有
@@ -138,6 +283,7 @@ func OCR(d Deps) func(ctx context.Context, s State) (State, error) {
 			s.Structured = fields
 		}
 		s.Err = nil
+		d.report("ocr", 1, 1, "")
 		return s, nil
 	}
 }

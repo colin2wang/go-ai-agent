@@ -2,16 +2,20 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	httpSwagger "github.com/swaggo/http-swagger"
 
 	_ "go-ai-agent/api" // swag 生成的 OpenAPI 文档
+	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/llm"
 	"go-ai-agent/internal/stats"
 )
@@ -32,16 +36,61 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat/send", s.handleChatSend)                    // 对话：SSE 流式回复
 	mux.HandleFunc("POST /api/features/{id}/run", s.handleRunFeature)
 	mux.HandleFunc("POST /api/payslip/review", s.handlePayslipReview) // 工资单场景快捷入口
+	mux.HandleFunc("GET /api/jobs", s.handleJobList)
 	mux.HandleFunc("GET /api/jobs/{id}", s.handleJob)
+	mux.HandleFunc("GET /api/jobs/{id}/events", s.handleJobEvents) // 异步任务进度 SSE
 	// 内嵌 SPA 前端（根路径及未知路径回退 index.html）
 	mux.Handle("GET /", staticHandler())
 }
 
-// ServeHTTP 实现 http.Handler（供测试与嵌入使用）。
+// ServeHTTP 实现 http.Handler；配置了 server.api-tokens 时对 /api/* 强制鉴权
+// （健康检查可用 auth-exclude-health 豁免；前端页面与静态资源不鉴权）。
+// 路由树与鉴权包装只构建一次，后续请求直接复用。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	mux := http.NewServeMux()
-	s.Register(mux)
-	mux.ServeHTTP(w, r)
+	s.routeOnce.Do(func() {
+		mux := http.NewServeMux()
+		s.Register(mux)
+		if len(s.cfg.Server.APITokens) == 0 {
+			s.router = mux
+			return
+		}
+		s.router = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !s.authRequired(r) || s.tokenValid(r) {
+				mux.ServeHTTP(w, r)
+				return
+			}
+			fail(w, http.StatusUnauthorized, "缺少或无效的 API 令牌（Authorization: Bearer <token>）")
+		})
+	})
+	s.router.ServeHTTP(w, r)
+}
+
+// authRequired 判定请求是否需要鉴权：仅 /api/* 参与，可选豁免 /api/health。
+func (s *Server) authRequired(r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		return false
+	}
+	if s.cfg.Server.AuthExcludeHealth && r.URL.Path == "/api/health" {
+		return false
+	}
+	return true
+}
+
+// tokenValid 校验 Authorization: Bearer 与 X-API-Key 两种头，常数时间比对。
+func (s *Server) tokenValid(r *http.Request) bool {
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if got == "" {
+		got = r.Header.Get("X-API-Key")
+	}
+	if got == "" {
+		return false
+	}
+	for _, t := range s.cfg.Server.APITokens {
+		if subtle.ConstantTimeCompare([]byte(t), []byte(got)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // handleHealth godoc
@@ -148,11 +197,14 @@ func (s *Server) handleProviderCheck(w http.ResponseWriter, r *http.Request) {
 
 // handleRunFeature godoc
 // @Summary      执行子功能工作流
-// @Description  multipart 上传文件并按子功能 id 执行其工作流。单文件用 file 字段；多页场景用 files 字段（可多个，按上传顺序处理）
+// @Description  multipart 上传文件并按子功能 id 执行其工作流。单文件用 file 字段；多页场景用 files 字段（可多个，按上传顺序处理）。
+// @Description  启用 storage.persist-jobs 后默认异步：立即返回 job_id（status=processing），前端轮询 GET /api/jobs/{id} 获取进度与结果；
+// @Description  可用 query 参数 async=1 / async=0 强制单次请求的同步/异步行为。
 // @Tags         features
 // @Accept       multipart/form-data
 // @Produce      json
 // @Param        id     path      string  true   "子功能 ID（如 payslip-ocr / book-toc）"
+// @Param        async  query     string  false  "async=1 强制异步 / async=0 强制同步"
 // @Param        file   formData  file    false  "单文件输入（如工资单图片）"
 // @Param        files  formData  file    false  "多页输入（如多张目录页扫描件，可多个）"
 // @Success      200   {object}  JobResult
@@ -193,28 +245,52 @@ func (s *Server) handlePayslipReview(w http.ResponseWriter, r *http.Request) {
 }
 
 // runFeature 上传 + 执行 + 记录任务结果的公共流程。
+// 异步模式（persist-jobs 开启或请求 async=1）：登记任务后立即返回 job_id，
+// 后台执行并把进度写入 jobs 表；同步模式保持旧行为。
 func (s *Server) runFeature(w http.ResponseWriter, r *http.Request, featureID string) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB
+	in := config.Input{}
+	if f, ok := s.cfg.Feature(featureID); ok {
+		in = f.Input
+	}
+	// 请求体硬上限：比声明的总体积上限多留 8MB 余量给 multipart 边界开销
+	r.Body = http.MaxBytesReader(w, r.Body, in.TotalBytesLimit()+(8<<20))
+	if err := r.ParseMultipartForm(32 << 20); err != nil { // 内存缓冲 32MB，超出落磁盘临时文件
 		fail(w, http.StatusBadRequest, "解析 multipart 失败: "+err.Error())
 		return
 	}
-	paths, err := s.saveUploads(r)
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+	paths, err := s.saveUploads(r, in)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	if s.asyncRun(featureID, r) {
+		job, err := s.startAsyncJob(featureID, paths, len(paths))
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "登记异步任务失败: "+err.Error())
+			return
+		}
+		respond(w, http.StatusAccepted, job)
+		return
+	}
+
 	start := time.Now()
 	fs, runErr := s.runPipeline(featureID, paths)
 	job := toJob(newJobID(), featureID, fs, runErr, start)
 	s.mu.Lock()
-	s.jobs[job.JobID] = job
+	s.rememberJobLocked(job)
 	s.mu.Unlock()
 	respond(w, http.StatusOK, job)
 }
 
 // handleJob godoc
 // @Summary      查询任务结果
-// @Description  按 jobID 查询一次执行的结果（当前实现为同步接口，此端点预留异步扩展）
+// @Description  按 jobID 查询一次执行的结果与进度（异步任务轮询此接口；启用 persist-jobs 后重启仍可查询历史任务）
 // @Tags         jobs
 // @Produce      json
 // @Param        id  path  string  true  "任务 ID"
@@ -223,9 +299,7 @@ func (s *Server) runFeature(w http.ResponseWriter, r *http.Request, featureID st
 // @Router       /api/jobs/{id} [get]
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	s.mu.Lock()
-	job, ok := s.jobs[id]
-	s.mu.Unlock()
+	job, ok := s.lookupJob(id)
 	if !ok {
 		fail(w, http.StatusNotFound, "job not found: "+id)
 		return
@@ -233,7 +307,10 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, job)
 }
 
-// newJobID 生成任务 ID（时间戳 + 计数，简单可读）。
+// jobSeq 保证同一纳秒内并发生成的任务 ID 仍唯一。
+var jobSeq atomic.Uint64
+
+// newJobID 生成任务 ID（时间戳 + 全局计数，简单可读且无碰撞）。
 func newJobID() string {
-	return fmt.Sprintf("job-%d", time.Now().UnixNano())
+	return fmt.Sprintf("job-%d-%d", time.Now().UnixNano(), jobSeq.Add(1))
 }

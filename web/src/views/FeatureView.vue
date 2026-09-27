@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
-import { runFeature } from '../api'
+import { runFeatureAsync } from '../api'
 import { duration, thousand } from '../chart'
 import type { FeatureInfo, JobResult, TOCEntry } from '../types'
 
@@ -33,6 +33,17 @@ const accept = computed(
 )
 const hint = computed(() => props.feature.input?.hint ?? '本地模型处理通常需要 1–5 分钟')
 
+/** 上传限制提示（取自后端下发的 input 上限，便于用户提前知情）。 */
+const limitText = computed(() => {
+  const inp = props.feature.input
+  if (!inp?.max_files && !inp?.max_total_mb) return ''
+  const parts: string[] = []
+  if (inp.max_files) parts.push(`最多 ${inp.max_files} 个`)
+  if (inp.max_file_mb) parts.push(`单个 ≤${inp.max_file_mb}MB`)
+  if (inp.max_total_mb) parts.push(`总计 ≤${inp.max_total_mb}MB`)
+  return parts.join(' · ')
+})
+
 interface Preview {
   name: string
   url: string
@@ -45,6 +56,12 @@ const loading = ref(false)
 const error = ref('')
 const result = ref<JobResult | null>(null)
 const activeTab = ref('report')
+
+/** 异步执行中的进度快照（后端 jobs 表轮询回来）。 */
+const progress = ref<JobResult | null>(null)
+/** 本地计时（ms）：任务排队/执行中的已等待时长。 */
+const elapsed = ref(0)
+let timer = 0
 
 function clearPreviews() {
   previews.value.forEach((p) => URL.revokeObjectURL(p.url))
@@ -86,6 +103,33 @@ function acceptMatches(file: File): boolean {
 }
 
 /**
+ * 提交前的本地预校验：按后端下发的 input 上限提前拦截，
+ * 避免大体积上传走完网络才被服务端拒绝（服务端仍会重复强校验）。
+ */
+function validateFiles(): string {
+  const inp = props.feature.input
+  const maxFiles = inp?.max_files ?? 0
+  const maxFileMB = inp?.max_file_mb ?? 0
+  const maxTotalMB = inp?.max_total_mb ?? 0
+  if (maxFiles && files.value.length > maxFiles) {
+    return `最多上传 ${maxFiles} 个文件（已选 ${files.value.length} 个）`
+  }
+  let total = 0
+  for (let i = 0; i < files.value.length; i++) {
+    const f = files.value[i]
+    const mb = f.size / 1048576
+    total += mb
+    if (maxFileMB && mb > maxFileMB) {
+      return `第 ${i + 1} 个文件 ${mb.toFixed(1)}MB 超过单文件上限 ${maxFileMB}MB`
+    }
+  }
+  if (maxTotalMB && total > maxTotalMB) {
+    return `上传总体积 ${total.toFixed(1)}MB 超过上限 ${maxTotalMB}MB`
+  }
+  return ''
+}
+
+/**
  * 全局粘贴：组件挂载期间监听 window 的 paste 事件，从剪贴板提取图片
  * （按 accept 白名单过滤 MIME），自动重命名为「粘贴图片-N.png」后追加。
  */
@@ -121,17 +165,39 @@ function removeAt(index: number) {
 
 async function submit() {
   if (!files.value.length || loading.value) return
+  const invalid = validateFiles()
+  if (invalid) {
+    error.value = invalid
+    return
+  }
   loading.value = true
   reset()
+  elapsed.value = 0
+  const startedAt = Date.now()
+  timer = window.setInterval(() => (elapsed.value = Date.now() - startedAt), 500)
   try {
-    result.value = await runFeature(props.feature.id, files.value)
+    // 后端启用 persist-jobs 时为异步：下方轮询回调逐次刷新 progress；
+    // 未启用时首次调用即返回终态，行为与旧版一致。
+    result.value = await runFeatureAsync(props.feature.id, files.value, (job) => {
+      progress.value = job
+    })
     emit('done')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     loading.value = false
+    progress.value = null
+    window.clearInterval(timer)
+    timer = 0
   }
 }
+
+/** 进度百分比（无 total 时返回 null，模板降级为不确定态动画）。 */
+const progressPct = computed<number | null>(() => {
+  const p = progress.value
+  if (!p || !p.total || p.total <= 0) return null
+  return Math.min(100, Math.round(((p.progress ?? 0) / p.total) * 100))
+})
 
 /** 图书目录条目（structured.entries）。 */
 const entries = computed<TOCEntry[]>(() => {
@@ -175,6 +241,7 @@ onMounted(() => window.addEventListener('paste', onPaste))
 onBeforeUnmount(() => {
   window.removeEventListener('paste', onPaste)
   clearPreviews()
+  if (timer) window.clearInterval(timer)
 })
 </script>
 
@@ -206,7 +273,10 @@ onBeforeUnmount(() => {
       <article class="card panel">
         <header class="card-head">
           <p class="card-title">{{ multiple ? '上传图片' : '上传文件' }}</p>
-          <p class="card-sub">{{ multiple ? `已选 ${files.length} 张` : '单文件' }}</p>
+          <p class="card-sub">
+            {{ multiple ? `已选 ${files.length} 张` : '单文件' }}
+            <span v-if="limitText"> · {{ limitText }}</span>
+          </p>
         </header>
 
         <label
@@ -280,7 +350,7 @@ onBeforeUnmount(() => {
               下载
             </button>
           </div>
-          <p v-else class="card-sub">尚未执行</p>
+          <p v-else class="card-sub">{{ loading ? '执行中' : '尚未执行' }}</p>
         </header>
 
         <div v-if="result" class="result">
@@ -374,6 +444,30 @@ onBeforeUnmount(() => {
               </ul>
             </div>
           </template>
+        </div>
+
+        <div v-else-if="loading" class="running">
+          <header class="running-head">
+            <span class="spinner" />
+            <p class="running-title">{{ progress?.detail || '任务执行中…' }}</p>
+            <p class="running-elapsed">已等待 {{ duration(elapsed) }}</p>
+          </header>
+          <div class="bar">
+            <div
+              class="bar-fill"
+              :class="{ indeterminate: progressPct === null }"
+              :style="progressPct !== null ? { width: `${progressPct}%` } : {}"
+            />
+          </div>
+          <p class="running-sub">
+            <template v-if="progressPct !== null">
+              进度 {{ progress?.progress ?? 0 }} / {{ progress?.total }}（{{ progressPct }}%）
+            </template>
+            <template v-else>高分辨率扫描件逐页识别较慢，可安心等待</template>
+          </p>
+          <p class="running-hint">
+            {{ feature.async ? '任务已落库，刷新或切换到其他页面不会中断执行。' : '本页同步等待结果返回。' }}
+          </p>
         </div>
 
         <div v-else class="placeholder">
@@ -795,6 +889,95 @@ onBeforeUnmount(() => {
   color: var(--text-3);
   font-size: 13px;
   text-align: center;
+}
+
+/* ---- 执行中进度 ---- */
+.running {
+  margin: 16px 20px 0;
+  padding: 16px 18px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.running-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--blue);
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.running-title {
+  font-size: 13px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.running-elapsed {
+  margin-left: auto;
+  flex: none;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  margin-top: 12px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--blue);
+  transition: width 0.4s ease;
+}
+
+/* 总步数未知时的滑动动画 */
+.bar-fill.indeterminate {
+  width: 34%;
+  animation: slide 1.3s ease-in-out infinite;
+}
+
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.running-sub {
+  margin-top: 9px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.running-hint {
+  margin-top: 3px;
+  color: var(--text-3);
+  font-size: 12px;
 }
 
 .place-icon {

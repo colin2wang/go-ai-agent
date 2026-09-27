@@ -32,6 +32,7 @@ import (
 	"github.com/tmc/langchaingo/llms"
 
 	"go-ai-agent/internal/config"
+	"go-ai-agent/internal/stats"
 )
 
 // chatImage 一条消息附带的图片（视觉模型输入）。
@@ -140,7 +141,8 @@ type modelCaps struct {
 }
 
 // modelCapsCache 模型能力探测缓存：provider|model → 结果。
-// 只要模型不变就复用，避免每次切换模型都重复探测（进程内缓存，重启即失效）。
+// 只要模型不变就复用，避免每次切换模型都重复探测（进程内缓存，
+// 启动时从 SQLite model_caps 预热，探测后同步落库）。
 type modelCapsCache struct {
 	mu    sync.RWMutex
 	items map[string]modelCaps
@@ -165,6 +167,43 @@ func (c *modelCapsCache) put(provider, model string, caps modelCaps) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.items[capsKey(provider, model)] = caps
+}
+
+// warm 启动预热：仅在内存无该键时写入（从 SQLite model_caps 行加载）。
+func (c *modelCapsCache) warm(provider, model string, row stats.CapsRow) {
+	caps := modelCaps{
+		Vision: row.Vision, Reasoning: row.Reasoning, Stream: row.Stream, StreamNote: row.StreamNote,
+		ProbedAt:    time.UnixMilli(row.ProbedAtMS).Format(time.RFC3339),
+		ProbedVLM:   row.ProbedVLM,
+		ProbedJSON:  row.ProbedJSON,
+		HeuristicOK: row.HeuristicOK,
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.items[capsKey(provider, model)]; !ok {
+		c.items[capsKey(provider, model)] = caps
+	}
+}
+
+// persistCaps 把探测结果同步写入 SQLite（未启用统计库时 no-op；失败仅记日志，
+// 不影响本次请求响应）。
+func (s *Server) persistCaps(provider, model string, caps modelCaps) {
+	if s.recorder == nil {
+		return
+	}
+	probedAtMS := time.Now().UnixMilli()
+	if t, err := time.Parse(time.RFC3339, caps.ProbedAt); err == nil {
+		probedAtMS = t.UnixMilli()
+	}
+	if err := s.recorder.SaveCaps(stats.CapsRow{
+		Provider: provider, Model: model,
+		Vision: caps.Vision, Reasoning: caps.Reasoning, Stream: caps.Stream, StreamNote: caps.StreamNote,
+		ProbedVLM: caps.ProbedVLM, ProbedJSON: caps.ProbedJSON, HeuristicOK: caps.HeuristicOK,
+		ProbedAtMS: probedAtMS,
+	}); err != nil {
+		slog.Warn("能力探测结果持久化失败", slog.String("provider", provider),
+			slog.String("model", model), slog.String("error", err.Error()))
+	}
 }
 
 // visionNameKeywords 模型名中的视觉系关键词（端点元数据缺失时的启发式判定）。
@@ -330,12 +369,15 @@ func (s *Server) handleChatStreamCheck(w http.ResponseWriter, r *http.Request) {
 	if caps, ok := s.capsCache.get(name, model); ok {
 		caps.Stream, caps.StreamNote = supported, detail
 		s.capsCache.put(name, model, caps)
+		s.persistCaps(name, model, caps)
 	} else {
 		hv, hr := detectModelCaps(model, nil)
-		s.capsCache.put(name, model, modelCaps{
+		caps := modelCaps{
 			Vision: hv, Reasoning: hr, Stream: supported, StreamNote: detail,
 			ProbedAt: time.Now().Format(time.RFC3339), HeuristicOK: true,
-		})
+		}
+		s.capsCache.put(name, model, caps)
+		s.persistCaps(name, model, caps)
 	}
 	respond(w, http.StatusOK, map[string]any{
 		"provider":         p.Name,
@@ -524,6 +566,7 @@ func (s *Server) handleModelCaps(w http.ResponseWriter, r *http.Request) {
 	caps := s.probeModelCaps(r.Context(), p, model)
 	s.capsCache.put(name, model, caps)
 	s.probeLock.Unlock()
+	s.persistCaps(name, model, caps) // 真实探测结果落库，重启免重测
 	respond(w, http.StatusOK, capsResponse(p, model, caps, false))
 }
 

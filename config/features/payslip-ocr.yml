@@ -21,12 +21,18 @@ input:
   multiple: true
   accept: image/png,image/jpeg,image/webp
   hint: 可一次上传多张（工资单可能分多张截图，会合并为一份结果），也可 Ctrl+V 粘贴；本地模型提取通常需要 1–5 分钟
+  max-files: 8              # 单次最多张数
+  max-file-mb: 12           # 单张图片体积上限
+  max-total-mb: 40          # 本次上传总体积上限
 
 # ---- 工作流声明 ----
 workflow:
   type: payslip-ocr          # 编排类型（对应 internal/graph 内置图）
   entry: ocr                 # 入口节点
   max-retries: 0             # 仅提取+合并，无校验回退
+  retry-max: 2               # 单次调用失败重试上限（仅限流/5xx/网络错误才重试）
+  retry-backoff-ms: 1500     # 重试退避基数（指数退避 + 抖动）
+  provider-max-requests: 2   # 单个 provider 的并发请求上限
   pipeline:                  # 展示用节点顺序（同时用于概览页的流程链）
     - ocr
 

@@ -12,12 +12,15 @@ description: 上传扫描版图书目录页（可多页），自动 OCR、跨页
 icon: book
 order: 3
 
-# ---- 输入声明（前端据此渲染上传控件）----
+# ---- 输入声明（前端据此渲染上传控件，服务端按下列上限强校验）----
 input:
   kind: image
   multiple: true            # 多页上传
   accept: image/png,image/jpeg,image/webp
   hint: 支持一次选择多张目录页（也可 Ctrl+V 粘贴）；建议按页码顺序选择
+  max-files: 20             # 单次最多页数
+  max-file-mb: 16           # 单张图片体积上限
+  max-total-mb: 64          # 本次上传总体积上限
 
 # ---- 输出声明（模板渲染，用法类似 Java FreeMarker）----
 output:
@@ -30,6 +33,10 @@ workflow:
   type: book-toc            # 编排类型（对应 internal/graph 内置图）
   entry: ocr
   max-retries: 0            # 目录识别无审读回退，失败即返回
+  max-parallel: 3           # 逐页 OCR 并发度（1 = 串行；受 provider-max-requests 与端点算力共同约束）
+  provider-max-requests: 2  # 单个 provider 的并发请求上限（本地推理建议 1–2，避免端点被打爆）
+  retry-max: 2              # 单次调用失败重试上限（仅限流/5xx/网络错误才重试）
+  retry-backoff-ms: 1500    # 重试退避基数（指数退避 + 抖动，上限 30s）
   pipeline:
     - ocr
     - merge

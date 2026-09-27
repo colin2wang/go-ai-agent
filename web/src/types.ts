@@ -7,12 +7,18 @@ export interface AppInfo {
   version: string
 }
 
-/** 输入声明：前端据此渲染上传控件（单文件 / 多页）。 */
+/** 输入声明：前端据此渲染上传控件（单文件 / 多页），max_* 为服务端强校验上限。 */
 export interface FeatureInput {
   kind: string
   multiple: boolean
   accept: string
   hint: string
+  /** 单次上传文件数上限。 */
+  max_files: number
+  /** 单个文件体积上限 MB。 */
+  max_file_mb: number
+  /** 本次上传总体积上限 MB。 */
+  max_total_mb: number
 }
 
 /** 输出声明：模板渲染与下载扩展名。 */
@@ -45,6 +51,8 @@ export interface FeatureInfo {
   input: FeatureInput
   output: FeatureOutput
   chat: FeatureChat
+  /** true = 后端启用异步任务（上传后立即返回 job_id，轮询获取进度）。 */
+  async: boolean
 }
 
 /** 对话子功能配置（GET /api/features 的 chat 字段）。 */
@@ -150,11 +158,16 @@ export interface OverviewResponse {
   server_time: string
 }
 
-/** 子功能执行结果（POST /api/features/{id}/run）。 */
+/** 子功能执行结果（POST /api/features/{id}/run、GET /api/jobs/{id}）。 */
 export interface JobResult {
   job_id: string
   feature_id?: string
-  status: 'processing' | 'done' | 'failed'
+  status: 'pending' | 'processing' | 'running' | 'done' | 'failed'
+  /** 已完成步数（逐页 OCR 时为已完成页数）。 */
+  progress?: number
+  total?: number
+  /** 进度描述（如“ocr 2/5：第 2 页完成”）。 */
+  detail?: string
   final_report?: string
   structured?: Record<string, unknown>
   ocr_text?: string
@@ -162,6 +175,8 @@ export interface JobResult {
   review_notes?: string[]
   error?: string
   duration_ms: number
+  created_at?: string
+  updated_at?: string
 }
 
 export interface ApiError {

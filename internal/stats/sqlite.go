@@ -11,10 +11,22 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Recorder 单例封装 *sql.DB，异步队列经 llm.StatsLogger 接口调用。
+// Recorder 单例封装 *sql.DB，异步队列只依赖 llm.StatsLogger 接口调用。
 type Recorder struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
+
+// DB 暴露底层连接（jobs/model_caps/llm_cache 等辅助表共用同一个库文件）。
+func (r *Recorder) DB() *sql.DB {
+	if r == nil {
+		return nil
+	}
+	return r.db
+}
+
+// Path 数据库文件路径（日志与排障用）。
+func (r *Recorder) Path() string { return r.path }
 
 // CallRow 单次调用流水（概览页「最近调用」）。
 type CallRow struct {
@@ -96,7 +108,13 @@ func Open(path string, retentionDays int) (*Recorder, error) {
 	_, _ = db.Exec(`ALTER TABLE calls ADD COLUMN ts_ms INTEGER`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_calls_ts_ms ON calls(ts_ms)`)
 
-	r := &Recorder{db: db}
+	// 异步任务表 + 模型能力探测缓存 + LLM 结果缓存（均为可选能力，建表幂等）
+	if err := initAuxTables(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	r := &Recorder{db: db, path: path}
 	if retentionDays > 0 {
 		if err := r.Cleanup(retentionDays); err != nil {
 			db.Close()

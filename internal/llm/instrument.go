@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
@@ -86,6 +87,17 @@ type instrumentedLLM struct {
 }
 
 func (w *instrumentedLLM) GenerateContent(ctx context.Context, messages []llms.MessageContent, opts ...llms.CallOption) (*llms.ContentResponse, error) {
+	// 结果缓存：命中则直接回放（不发请求、不计入调用流水），并记一条 io-log 便于排障。
+	if w.factory.caps.decision(ctx, false) {
+		if key := CacheKey(w.provider, w.model, messages, cacheParamsFrom(opts)); key != "" {
+			if _, _, answer, reasoning, pt, ct, ok := w.factory.caps.store.CacheGet(key); ok {
+				resp := cachedResponse(w.model, answer, reasoning, pt, ct)
+				w.logCacheHit(messages, resp)
+				return resp, nil
+			}
+		}
+	}
+
 	id := ""
 	if h := w.factory.ioLog; h != nil && h.OnRequest != nil {
 		if h.NewID != nil {
@@ -105,7 +117,86 @@ func (w *instrumentedLLM) GenerateContent(ctx context.Context, messages []llms.M
 		promptTokens: pt, completionTokens: ct, latencyMs: int(latency),
 		ok: err == nil, errMsg: errString(err),
 	})
+	if err == nil && w.factory.caps.decision(ctx, false) {
+		w.factory.caps.put(w.provider, w.model, messages, opts, resp, pt, ct)
+	}
 	return resp, err
+}
+
+// logCacheHit 为命中缓存的调用补一条 io-log（用独立 request_id，不与真实请求混淆）。
+func (w *instrumentedLLM) logCacheHit(messages []llms.MessageContent, resp *llms.ContentResponse) {
+	h := w.factory.ioLog
+	if h == nil || h.OnResponse == nil {
+		return
+	}
+	id := ""
+	if h.NewID != nil {
+		id = h.NewID()
+	}
+	if h.OnRequest != nil {
+		h.OnRequest(id, w.provider, w.model, messages)
+	}
+	h.OnResponse(id, w.provider, w.model, resp, nil, 0)
+}
+
+// cachedResponse 由缓存行重建一个与端点响应等价的 ContentResponse。
+func cachedResponse(model, answer, reasoning string, pt, ct int) *llms.ContentResponse {
+	return &llms.ContentResponse{Choices: []*llms.ContentChoice{{
+		Content:          answer,
+		ReasoningContent: reasoning,
+		GenerationInfo: map[string]any{
+			"PromptTokens":     pt,
+			"CompletionTokens": ct,
+			"ModelName":        model,
+			"FromCache":        true,
+		},
+	}}}
+}
+
+// cacheParamsFrom 从 CallOption 列表中提取参与缓存哈希的参数。
+// langchaingo 未导出读取接口，这里把选项施加到零值配置上再取所需字段：
+// 无需感知具体选项实现，未显式设置的字段保持零值，不同调用之间仍可稳定比对。
+func cacheParamsFrom(opts []llms.CallOption) cacheParams {
+	cur := &llms.CallOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cur)
+		}
+	}
+	return cacheParams{
+		Temperature: cur.Temperature,
+		MaxTokens:   cur.MaxTokens,
+		StopWords:   append([]string(nil), cur.StopWords...),
+		JSONMode:    cur.JSONMode,
+		TopK:        cur.TopK,
+		TopP:        cur.TopP,
+		Seed:        cur.Seed,
+		N:           cur.N,
+	}
+}
+
+// put 写入一条缓存（失败不影响主链路：只是失去一次复用机会）。
+func (c *Cache) put(provider, model string,
+	messages []llms.MessageContent, opts []llms.CallOption, resp *llms.ContentResponse,
+	promptTokens, completionTokens int) {
+
+	if !c.Enabled() || resp == nil || len(resp.Choices) == 0 {
+		return
+	}
+	key := CacheKey(provider, model, messages, cacheParamsFrom(opts))
+	if key == "" {
+		return
+	}
+	ch := resp.Choices[0]
+	if strings.TrimSpace(ch.Content) == "" && !c.cfg.KeepOnErr {
+		return // 空回答不写缓存：下次仍应真实重试
+	}
+	var exp time.Time
+	if ttl := c.TTL(); ttl > 0 {
+		exp = time.Now().Add(ttl)
+	}
+	_ = c.store.CachePut(key, provider, model, ch.Content, ch.ReasoningContent,
+		promptTokens, completionTokens, exp)
 }
 
 // usageTokens 尽力从 GenerationInfo 中提取 prompt/completion token 数

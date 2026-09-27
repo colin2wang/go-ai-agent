@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,6 +24,7 @@ type Config struct {
 	Server   Server       `yaml:"server"`
 	Storage  Storage      `yaml:"storage"`
 	Logging  Logging      `yaml:"logging"`
+	Cache    Cache        `yaml:"cache"`
 	AI       AIRef        `yaml:"ai"`
 	Features []FeatureRef `yaml:"features"`
 
@@ -40,18 +42,31 @@ type App struct {
 
 // Server HTTP 服务配置。
 type Server struct {
-	Addr                     string `yaml:"addr"`
-	OpenBrowser              bool   `yaml:"open-browser"`
-	ReadHeaderTimeoutSeconds int    `yaml:"read-header-timeout-seconds"`
-	ShutdownTimeoutSeconds   int    `yaml:"shutdown-timeout-seconds"`
+	Addr                     string   `yaml:"addr"`
+	OpenBrowser              bool     `yaml:"open-browser"`
+	ReadHeaderTimeoutSeconds int      `yaml:"read-header-timeout-seconds"`
+	ShutdownTimeoutSeconds   int      `yaml:"shutdown-timeout-seconds"`
+	APITokens                []string `yaml:"api-tokens"` // 对外调用令牌（为空 = 不鉴权，本机单用户体验不变）
+	AuthExcludeHealth        bool     `yaml:"auth-exclude-health"`
 }
 
 // Storage LLM 调用统计落库配置。
 type Storage struct {
-	Enabled       bool   `yaml:"enabled"`
-	DBPath        string `yaml:"db-path"`
-	RetentionDays int    `yaml:"retention-days"`
-	QueueCapacity int    `yaml:"queue-capacity"`
+	Enabled        bool   `yaml:"enabled"`
+	DBPath         string `yaml:"db-path"`
+	RetentionDays  int    `yaml:"retention-days"`
+	QueueCapacity  int    `yaml:"queue-capacity"`
+	CapsTTLHours   int    `yaml:"caps-ttl-hours"`         // 模型能力探测缓存有效期（小时，0 = 默认 24）
+	PersistJobs    bool   `yaml:"persist-jobs"`           // 异步任务落库（重启后仍可查询结果）
+	PruneIntervalM int    `yaml:"prune-interval-minutes"` // 过期数据清理周期（分钟，0 = 默认 60）
+}
+
+// Cache LLM 结果缓存（按 provider+model+消息+参数 哈希复用，确定性提取任务收益最大）。
+type Cache struct {
+	Enabled   bool `yaml:"enabled"`
+	TTLHours  int  `yaml:"ttl-hours"` // 0 = 默认 24
+	MaxRows   int  `yaml:"max-rows"`  // 缓存行数上限，超出按写入时间淘汰（0 = 默认 2000）
+	KeepOnErr bool `yaml:"keep-on-error"`
 }
 
 // Logging 日志配置。
@@ -92,12 +107,15 @@ type Feature struct {
 // IsChat 对话类子功能（前端渲染聊天界面而非上传执行页）。
 func (f Feature) IsChat() bool { return f.Kind == "chat" }
 
-// Input 子功能的输入声明（前端据此渲染上传控件）。
+// Input 子功能的输入声明（前端据此渲染上传控件，服务端据此强校验）。
 type Input struct {
-	Kind     string `yaml:"kind"`     // image | file | text
-	Multiple bool   `yaml:"multiple"` // 是否支持多文件（如多页扫描件）
-	Accept   string `yaml:"accept"`   // input[accept]
-	Hint     string `yaml:"hint"`     // 上传区提示文案
+	Kind       string `yaml:"kind"`         // image | file | text
+	Multiple   bool   `yaml:"multiple"`     // 是否支持多文件（如多页扫描件）
+	Accept     string `yaml:"accept"`       // input[accept]
+	Hint       string `yaml:"hint"`         // 上传区提示文案
+	MaxFiles   int    `yaml:"max-files"`    // 单次上传文件数上限（0 = 默认 20）
+	MaxFileMB  int    `yaml:"max-file-mb"`  // 单个文件体积上限 MB（0 = 默认 16）
+	MaxTotalMB int    `yaml:"max-total-mb"` // 本次上传总体积上限 MB（0 = 默认 64）
 }
 
 // Chat 对话类子功能的专属配置。
@@ -126,10 +144,14 @@ type Output struct {
 
 // Workflow 子功能的工作流声明。
 type Workflow struct {
-	Type       string   `yaml:"type"`        // 编排类型（对应 internal/graph 内置图）
-	Entry      string   `yaml:"entry"`       // 入口节点
-	MaxRetries int      `yaml:"max-retries"` // 条件边回退重试上限
-	Pipeline   []string `yaml:"pipeline"`    // 展示用节点顺序
+	Type           string   `yaml:"type"`                  // 编排类型（对应 internal/graph 内置图）
+	Entry          string   `yaml:"entry"`                 // 入口节点
+	MaxRetries     int      `yaml:"max-retries"`           // 条件边回退重试上限
+	RetryMax       int      `yaml:"retry-max"`             // 单次调用内重试上限（限流/5xx 才重试，0 = 默认 2）
+	RetryBackoffMS int      `yaml:"retry-backoff-ms"`      // 重试退避基数（毫秒，0 = 不退避）
+	MaxParallel    int      `yaml:"max-parallel"`          // 逐页并发度（0/1 = 串行）
+	ProviderMaxReq int      `yaml:"provider-max-requests"` // 每个 provider 的并发上限（0 = 默认 2）
+	Pipeline       []string `yaml:"pipeline"`              // 展示用节点顺序
 }
 
 // aiDoc 对应 ai.yml 的根（`llm:` 节点）。
@@ -184,6 +206,7 @@ type Step struct {
 	Temperature      *float64 `yaml:"temperature"`     // 指针：区分「未设置」与 0
 	MaxTokens        int      `yaml:"max-tokens"`
 	ReasoningEnabled *bool    `yaml:"reasoning-enabled"` // nil = 回退全局
+	Cache            *bool    `yaml:"cache"`             // nil = 跟随全局 cache.enabled（结果缓存开关）
 }
 
 // WithDefaults 用 def 补齐未声明的字段，返回可直接使用的步骤配置。
@@ -356,6 +379,113 @@ func (c *Config) Feature(id string) (Feature, bool) {
 	return Feature{}, false
 }
 
+// ---- 上传/并发/缓存的服务端默认上限（features yml 可逐项覆盖）----
+const (
+	defaultInputMaxFiles    = 20
+	defaultInputMaxFileMB   = 16
+	defaultInputMaxTotalMB  = 64
+	defaultWorkflowParallel = 1
+	defaultProviderMaxReq   = 2
+	defaultCacheTTLHours    = 24
+	defaultCacheMaxRows     = 2000
+	defaultCapsTTLHours     = 24
+	defaultPruneIntervalMin = 60
+)
+
+// FileCountLimit / FileBytesLimit / TotalBytesLimit 上传限制（未声明时取默认值）。
+func (in Input) FileCountLimit() int {
+	if in.MaxFiles > 0 {
+		return in.MaxFiles
+	}
+	return defaultInputMaxFiles
+}
+
+func (in Input) FileBytesLimit() int64 {
+	mb := in.MaxFileMB
+	if mb <= 0 {
+		mb = defaultInputMaxFileMB
+	}
+	return int64(mb) << 20
+}
+
+func (in Input) TotalBytesLimit() int64 {
+	mb := in.MaxTotalMB
+	if mb <= 0 {
+		mb = defaultInputMaxTotalMB
+	}
+	return int64(mb) << 20
+}
+
+// Parallel 逐页并发度（<=0 归一为 1，即保持原有串行行为）。
+func (w Workflow) Parallel() int {
+	if w.MaxParallel <= 0 {
+		return defaultWorkflowParallel
+	}
+	return w.MaxParallel
+}
+
+// CallRetryMax 单次调用内的重试上限：未声明时，配置了退避则默认重试 2 次，
+// 否则保持旧行为（不重试）。
+func (w Workflow) CallRetryMax() int {
+	if w.RetryMax > 0 {
+		return w.RetryMax
+	}
+	if w.RetryBackoffMS > 0 {
+		return 2
+	}
+	return 0
+}
+
+// ProviderConcurrency 单个 provider 允许的并发请求数。
+func (w Workflow) ProviderConcurrency() int {
+	if w.ProviderMaxReq <= 0 {
+		return defaultProviderMaxReq
+	}
+	return w.ProviderMaxReq
+}
+
+// CacheEnabled 该步骤是否参与结果缓存（步骤显式声明优先于全局开关）。
+func (s Step) CacheEnabled(global bool) bool {
+	if s.Cache != nil {
+		return *s.Cache
+	}
+	return global
+}
+
+// CacheTTLHours / CacheMaxRows 结果缓存的过期与容量（未声明时取默认值）。
+// 方法名不能与字段同名，故加 Cache 前缀。
+func (c Cache) CacheTTLHours() int {
+	if c.TTLHours > 0 {
+		return c.TTLHours
+	}
+	return defaultCacheTTLHours
+}
+
+func (c Cache) CacheMaxRows() int {
+	if c.MaxRows > 0 {
+		return c.MaxRows
+	}
+	return defaultCacheMaxRows
+}
+
+// TTL 缓存有效期的时长形式（供调用处直接使用）。
+func (c Cache) TTL() time.Duration { return time.Duration(c.CacheTTLHours()) * time.Hour }
+
+func (st Storage) CapsTTL() int {
+	if st.CapsTTLHours > 0 {
+		return st.CapsTTLHours
+	}
+	return defaultCapsTTLHours
+}
+
+func (st Storage) PruneInterval() time.Duration {
+	m := st.PruneIntervalM
+	if m <= 0 {
+		m = defaultPruneIntervalMin
+	}
+	return time.Duration(m) * time.Minute
+}
+
 // validate 启动期校验：provider 引用、步骤模型、存储路径。
 func (c *Config) validate() error {
 	g := &c.LLM
@@ -400,6 +530,19 @@ func (c *Config) validate() error {
 				return fmt.Errorf("features.%s.chat.max-image-mb 不能为负数", f.ID)
 			}
 		}
+		// 上传与并发参数的合法性（非负）。
+		if f.Input.MaxFiles < 0 || f.Input.MaxFileMB < 0 || f.Input.MaxTotalMB < 0 {
+			return fmt.Errorf("features.%s.input 的 max-files/max-file-mb/max-total-mb 不能为负数", f.ID)
+		}
+		if f.Workflow.MaxParallel < 0 {
+			return fmt.Errorf("features.%s.workflow.max-parallel 不能为负数", f.ID)
+		}
+		if f.Workflow.ProviderMaxReq < 0 {
+			return fmt.Errorf("features.%s.workflow.provider-max-requests 不能为负数", f.ID)
+		}
+		if f.Workflow.RetryBackoffMS < 0 || f.Workflow.RetryMax < 0 {
+			return fmt.Errorf("features.%s.workflow.retry-backoff-ms/retry-max 不能为负数", f.ID)
+		}
 		for name, st := range f.Steps {
 			// 提示词（系统/用户）必须写在对应 features/*.yml 的 system-prompt/user-prompt 中，
 			// 代码内不再硬编码任何提示词。对话类走 chat.system-prompt，render 为本地模板渲染。
@@ -421,6 +564,20 @@ func (c *Config) validate() error {
 
 	if c.Storage.Enabled && c.Storage.DBPath == "" {
 		return fmt.Errorf("storage.enabled=true 但未配置 db-path")
+	}
+	if c.Cache.Enabled && !c.Storage.Enabled {
+		return fmt.Errorf("cache.enabled=true 需要 storage.enabled=true（结果缓存复用同一个 SQLite）")
+	}
+	if c.Storage.CapsTTLHours < 0 || c.Storage.PruneIntervalM < 0 {
+		return fmt.Errorf("storage.caps-ttl-hours/prune-interval-minutes 不能为负数")
+	}
+	if c.Cache.TTLHours < 0 || c.Cache.MaxRows < 0 {
+		return fmt.Errorf("cache.ttl-hours/max-rows 不能为负数")
+	}
+	for i, tok := range c.Server.APITokens {
+		if strings.TrimSpace(tok) == "" {
+			return fmt.Errorf("server.api-tokens[%d] 为空，请删除该项或填入非空令牌", i)
+		}
 	}
 	return nil
 }

@@ -28,6 +28,55 @@ type Factory struct {
 	stats     *StatsSink // 可为 nil
 	ioLog     *IoLogHook // 可为 nil
 	wireDump  bool       // HTTP 层抓包（io-log.debug 开启时置位）
+
+	caps     *Cache // 结果缓存（未启用时为 nil，所有操作 no-op）
+	sems     map[string]chan struct{}
+	semLimit map[string]int
+	semMu    sync.Mutex
+}
+
+// SetCache 注入 LLM 结果缓存（相同输入命中即不再请求端点）。传 nil 表示关闭。
+func (f *Factory) SetCache(c *Cache) { f.caps = c }
+
+// SetProviderConcurrency 设定每个 provider 的并发请求上限（<=0 归一为 1）。
+// 需在首次 Acquire 之前调用（本项目在服务启动时设置），本地推理端点
+// 被并发打爆时起到闸门作用。
+func (f *Factory) SetProviderConcurrency(limit int) {
+	f.semMu.Lock()
+	defer f.semMu.Unlock()
+	if limit <= 0 {
+		limit = 1
+	}
+	// 记录默认上限，各 provider 的信号量在首次 Acquire 时按此值创建
+	f.semLimit[""] = limit
+}
+
+// Acquire 获取指定 provider 的一个并发额度，返回释放函数。
+// 额度占满时阻塞等待，ctx 取消（如客户端断开/超时）则立即返回错误。
+func (f *Factory) Acquire(ctx context.Context, provider string) (func(), error) {
+	f.semMu.Lock()
+	sem, ok := f.sems[provider]
+	if !ok {
+		limit := f.semLimit[""]
+		if limit <= 0 {
+			limit = 1
+		}
+		sem = make(chan struct{}, limit)
+		f.sems[provider] = sem
+	}
+	f.semMu.Unlock()
+
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	default:
+	}
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // EnableWireDump 开启 HTTP 层请求/响应原文日志（排查端点交互问题时使用）。
@@ -40,7 +89,8 @@ func NewFactory(providers []config.Provider, stats *StatsSink, ioLog *IoLogHook)
 	for _, p := range providers {
 		m[p.Name] = p
 	}
-	f := &Factory{cache: map[string]Model{}, providers: m, stats: stats, ioLog: ioLog}
+	f := &Factory{cache: map[string]Model{}, providers: m, stats: stats, ioLog: ioLog,
+		sems: map[string]chan struct{}{}, semLimit: map[string]int{}}
 	for name, p := range m {
 		if _, err := f.build(p, "probe-model"); err != nil {
 			return nil, fmt.Errorf("预热 provider %q 失败: %w", name, err)
