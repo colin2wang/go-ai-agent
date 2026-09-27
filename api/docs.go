@@ -90,7 +90,7 @@ const docTemplate = `{
         },
         "/api/features/{id}/run": {
             "post": {
-                "description": "multipart 上传文件并按子功能 id 执行其工作流。单文件用 file 字段；多页场景用 files 字段（可多个，按上传顺序处理）",
+                "description": "multipart 上传文件并按子功能 id 执行其工作流。单文件用 file 字段；多页场景用 files 字段（可多个，按上传顺序处理）。\n启用 storage.persist-jobs 后默认异步：立即返回 job_id（status=processing），前端轮询 GET /api/jobs/{id} 获取进度与结果；\n可用 query 参数 async=1 / async=0 强制单次请求的同步/异步行为。",
                 "consumes": [
                     "multipart/form-data"
                 ],
@@ -108,6 +108,12 @@ const docTemplate = `{
                         "name": "id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "async=1 强制异步 / async=0 强制同步",
+                        "name": "async",
+                        "in": "query"
                     },
                     {
                         "type": "file",
@@ -167,9 +173,38 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/jobs": {
+            "get": {
+                "description": "返回最近的异步任务（不含结果正文），query: n（条数，默认 50，上限 200）",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "jobs"
+                ],
+                "summary": "最近任务列表",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "条数",
+                        "name": "n",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "jobs: JobResult 数组",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/api/jobs/{id}": {
             "get": {
-                "description": "按 jobID 查询一次执行的结果（当前实现为同步接口，此端点预留异步扩展）",
+                "description": "按 jobID 查询一次执行的结果与进度（异步任务轮询此接口；启用 persist-jobs 后重启仍可查询历史任务）",
                 "produces": [
                     "application/json"
                 ],
@@ -191,6 +226,41 @@ const docTemplate = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/api.JobResult"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/api.apiError"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/jobs/{id}/events": {
+            "get": {
+                "description": "以 SSE 推送任务进度与终态：event: progress / done / failed，data 为 JobResult；任务已结束时收到终态后立即关闭",
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "jobs"
+                ],
+                "summary": "任务进度流（SSE）",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "任务 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "SSE 事件流",
+                        "schema": {
+                            "type": "string"
                         }
                     },
                     "404": {
@@ -460,6 +530,10 @@ const docTemplate = `{
         "api.FeatureInfo": {
             "type": "object",
             "properties": {
+                "async": {
+                    "description": "true = 上传后立即返回 job_id，前端轮询获取进度与结果",
+                    "type": "boolean"
+                },
                 "chat": {
                     "$ref": "#/definitions/api.FeatureChat"
                 },
@@ -514,6 +588,15 @@ const docTemplate = `{
                 "kind": {
                     "type": "string"
                 },
+                "max_file_mb": {
+                    "type": "integer"
+                },
+                "max_files": {
+                    "type": "integer"
+                },
+                "max_total_mb": {
+                    "type": "integer"
+                },
                 "multiple": {
                     "type": "boolean"
                 }
@@ -536,6 +619,13 @@ const docTemplate = `{
         "api.JobResult": {
             "type": "object",
             "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "detail": {
+                    "description": "进度描述（如“ocr 2/5”）",
+                    "type": "string"
+                },
                 "duration_ms": {
                     "type": "integer"
                 },
@@ -554,6 +644,10 @@ const docTemplate = `{
                 "ocr_text": {
                     "type": "string"
                 },
+                "progress": {
+                    "description": "已完成步数（逐页 OCR 时为已完成页数）",
+                    "type": "integer"
+                },
                 "review_notes": {
                     "type": "array",
                     "items": {
@@ -561,14 +655,20 @@ const docTemplate = `{
                     }
                 },
                 "status": {
-                    "description": "processing | done | failed",
+                    "description": "pending | processing | running | done | failed",
                     "type": "string"
                 },
                 "structured": {
                     "type": "object",
                     "additionalProperties": {}
                 },
+                "total": {
+                    "type": "integer"
+                },
                 "translation": {
+                    "type": "string"
+                },
+                "updated_at": {
                     "type": "string"
                 }
             }
