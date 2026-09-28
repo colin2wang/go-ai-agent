@@ -11,6 +11,7 @@ import type {
   ProviderModels,
   ModelCaps,
 } from './types'
+import { createSSEParser, type SSEEvent } from './sse'
 
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url)
@@ -51,12 +52,13 @@ export async function runFeatureAsync(
   id: string,
   files: File | File[],
   onProgress?: (job: JobResult) => void,
+  pollMs: number = JOB_POLL_MS,
 ): Promise<JobResult> {
   const first = await runFeature(id, files)
   if (first.status === 'done' || first.status === 'failed') return first
   onProgress?.(first)
   for (;;) {
-    await new Promise((r) => setTimeout(r, JOB_POLL_MS))
+    await new Promise((r) => setTimeout(r, pollMs))
     const job = await fetchJob(first.job_id)
     onProgress?.(job)
     if (job.status === 'done' || job.status === 'failed') return job
@@ -183,35 +185,30 @@ export async function sendChat(
   const reader = res.body?.getReader()
   if (!reader) throw new Error('浏览器不支持流式读取')
   const decoder = new TextDecoder()
-  let buf = ''
+  // 事件可能跨 chunk、服务端可能用 CRLF，解析交给独立的增量解析器（见 sse.ts）
+  const parser = createSSEParser()
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
-    buf += decoder.decode(value, { stream: true })
-    // SSE 事件以空行分隔；data 为单行 JSON
-    for (;;) {
-      const idx = buf.indexOf('\n\n')
-      if (idx < 0) break
-      const rawEvent = buf.slice(0, idx)
-      buf = buf.slice(idx + 2)
-      let event = ''
-      const dataLines: string[] = []
-      for (const line of rawEvent.split('\n')) {
-        if (line.startsWith('event:')) event = line.slice(6).trim()
-        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
-      }
-      if (!event || !dataLines.length) continue
-      let payload: unknown
-      try {
-        payload = JSON.parse(dataLines.join('\n'))
-      } catch {
-        continue
-      }
-      if (event === 'meta') handlers.onMeta?.(payload as { provider: string; model: string })
-      else if (event === 'delta') handlers.onDelta?.(payload as { type: 'answer' | 'reasoning'; text: string })
-      else if (event === 'done') handlers.onDone?.(payload as ChatDoneEvent)
-      else if (event === 'error') throw new Error((payload as { error?: string }).error ?? '生成失败')
-    }
+    const events = parser.push(decoder.decode(value, { stream: true }))
+    for (const ev of events) dispatchSSEEvent(ev, handlers)
   }
+  // 流结束时补解析一次（上游未以空行结尾的最后一个事件）
+  for (const ev of parser.flush()) dispatchSSEEvent(ev, handlers)
   return null
+}
+
+/** 把一个已解析的 SSE 事件派发给对应回调。 */
+function dispatchSSEEvent(ev: SSEEvent, handlers: ChatStreamHandlers): void {
+  let payload: unknown
+  try {
+    payload = JSON.parse(ev.data)
+  } catch {
+    return // 非法 JSON 片段丢弃，不中断整条流
+  }
+  if (ev.event === 'meta') handlers.onMeta?.(payload as { provider: string; model: string })
+  else if (ev.event === 'delta')
+    handlers.onDelta?.(payload as { type: 'answer' | 'reasoning'; text: string })
+  else if (ev.event === 'done') handlers.onDone?.(payload as ChatDoneEvent)
+  else if (ev.event === 'error') throw new Error((payload as { error?: string }).error ?? '生成失败')
 }

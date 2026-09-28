@@ -22,15 +22,19 @@ import (
 // serveWebCmd 进入 Web 模式；args 为子命令后的剩余旗标（nil 表示无参数）。
 func serveWebCmd(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", "", `HTTP 监听地址（默认 :8000，被占用则自动挑选空闲端口）`)
+	addr := fs.String("addr", "", `HTTP 监听地址（默认 127.0.0.1:8000，被占用则自动挑选空闲端口）`)
 	cfgPath := fs.String("config", defaultConfigPath, "总配置文件路径")
 	noBrowser := fs.Bool("no-browser", false, "不自动打开浏览器")
 	_ = fs.Parse(args) // 未识别的参数会被忽略，保持零配置可用
 	serveWeb(*addr, *cfgPath, *noBrowser)
 }
 
-// defaultAddr 首选监听地址：端口 8000；仅当它被占用时才回退随机空闲端口。
-const defaultAddr = ":8000"
+// defaultAddr 首选监听地址：本机回环 8000 端口。
+// 默认只绑 127.0.0.1（不监听所有网卡）——这是本地单用户工具，暴露到局域网/公网
+// 会让未鉴权的接口（默认无 api-tokens）直接可达。需要他人访问时，在
+// config.yml 里显式写 server.addr: "0.0.0.0:8000" 或 ":8000"。
+// 仅当该端口被占用时才回退随机空闲端口（同样只绑回环）。
+const defaultAddr = "127.0.0.1:8000"
 
 // reserveAddr 确定监听地址：addr 为空时取 defaultAddr，尝试绑定成功即返回；
 // 若该端口已被占用，则回退到一个随机空闲端口并提示；其他错误（如权限不足）直接返回。
@@ -211,7 +215,9 @@ func serveWeb(addr, cfgPath string, noBrowser bool) {
 	base := fmt.Sprintf("http://localhost:%d", port)
 	fmt.Printf("harness %s listening on %s\n", version, base)
 	fmt.Printf("web UI:     %s/\n", base)
-	fmt.Printf("swagger UI: %s/swagger/index.html\n", base)
+	if cfg.Server.SwaggerOn() {
+		fmt.Printf("swagger UI: %s/swagger/index.html\n", base)
+	}
 	fmt.Println("Ctrl+C 退出")
 	if !noBrowser {
 		openBrowser(base)

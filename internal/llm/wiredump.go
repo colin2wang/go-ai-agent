@@ -18,6 +18,34 @@ type wireDumpTransport struct {
 	next http.RoundTripper
 }
 
+// redactedHeaders 必须在 wire 日志中遮蔽的请求头（凭据一律不落盘、不打印）。
+// 即便 io-log.debug 开启也不输出原文——调试端点交互不需要拿到密钥。
+var redactedHeaders = map[string]bool{
+	"authorization":  true,
+	"api-key":        true,
+	"x-api-key":      true,
+	"x-goog-api-key": true,
+	"cookie":         true,
+	"set-cookie":     true,
+}
+
+// headerLogAttrs 把请求头整理为日志属性，敏感头替换为遮蔽标记。
+func headerLogAttrs(h http.Header) []slog.Attr {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make([]slog.Attr, 0, len(h))
+	for k, v := range h {
+		name := strings.ToLower(k)
+		if redactedHeaders[name] {
+			out = append(out, slog.String(name, "***redacted***"))
+			continue
+		}
+		out = append(out, slog.String(name, strings.Join(v, "; ")))
+	}
+	return out
+}
+
 // truncateBase64 将请求体里的 data:image/...;base64,<...> 替换为长度标记，避免日志刷屏。
 func truncateBase64(s string) string {
 	const marker = ";base64,"
@@ -125,11 +153,17 @@ func (t *wireDumpTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		body, err := io.ReadAll(req.Body)
 		req.Body.Close()
 		if err == nil {
-			slog.Info("llm wire request",
+			attrs := []slog.Attr{
 				slog.String("method", req.Method),
 				slog.String("url", req.URL.String()),
-				slog.String("body", truncateBase64(string(body))),
-			)
+			}
+			if hh := headerLogAttrs(req.Header); len(hh) > 0 {
+				// slog.Group 接受的是 any（Attr 或 kv 对），这里已持有 []slog.Attr，
+				// 直接用 GroupValue 组装避免额外的类型转换。
+				attrs = append(attrs, slog.Attr{Key: "headers", Value: slog.GroupValue(hh...)})
+			}
+			attrs = append(attrs, slog.String("body", truncateBase64(string(body))))
+			slog.LogAttrs(req.Context(), slog.LevelInfo, "llm wire request", attrs...)
 			req.Body = io.NopCloser(bytes.NewReader(body))
 		} else {
 			// 读失败也要把 body 还原为可读流

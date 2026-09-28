@@ -21,7 +21,8 @@ app:
 
 # ---- HTTP 服务 ----
 server:
-  addr: ":8000"                   # 首选监听端口；被占用时自动改用随机空闲端口（留空等价于 :8000）
+  addr: "127.0.0.1:8000"          # 监听地址；被占用时自动改用随机空闲端口（留空等价于 127.0.0.1:8000）
+                                  # 默认只绑回环：需要局域网/其他机器访问时改为 "0.0.0.0:8000" 或 ":8000"
   open-browser: true              # 启动后自动打开浏览器
   read-header-timeout-seconds: 10
   shutdown-timeout-seconds: 5
@@ -29,6 +30,7 @@ server:
   # 第三方系统调用时带任一头：Authorization: Bearer <token> 或 X-API-Key: <token>
   api-tokens: []                  # 例：["harness-3f9c3e0f"]；生产建议同时配合环境变量注入
   auth-exclude-health: false      # true = /api/health 豁免鉴权（供存活探测用）
+  swagger-enabled: true           # false = 关闭 /swagger 接口文档（暴露到非可信网络时建议关闭）
 
 # ---- 存储：LLM 调用统计与任务/缓存（同一 SQLite 文件，纯 Go 无 CGO）----
 storage:

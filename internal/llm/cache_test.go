@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,92 @@ func TestCacheKeyDeterministicAndSensitive(t *testing.T) {
 				t.Errorf("输入不同应得到不同 key")
 			}
 		})
+	}
+}
+
+// ---- 多模态图片的键处理 ----
+
+func imageMessages(url string) []llms.MessageContent {
+	return []llms.MessageContent{
+		{
+			Role: llms.ChatMessageTypeHuman,
+			Parts: []llms.ContentPart{
+				llms.TextContent{Text: "ocr"},
+				llms.ImageURLContent{URL: url},
+			},
+		},
+	}
+}
+
+func TestCacheKeyImageDigest(t *testing.T) {
+	big := "data:image/png;base64," + strings.Repeat("A", 200_000)
+	bigOther := "data:image/png;base64," + strings.Repeat("A", 199_999) + "B"
+	small := "data:image/png;base64,AAAA"
+	p := cacheParams{Temperature: 0.2}
+
+	kBig := CacheKey("p", "m", imageMessages(big), p)
+	if kBig == "" {
+		t.Fatal("图片消息也应产出缓存键")
+	}
+	// 同图同参 → 键稳定
+	if kBig != CacheKey("p", "m", imageMessages(big), p) {
+		t.Error("相同图片应得到稳定 key")
+	}
+	// 图片内容不同 → 键不同（摘要必须能区分）
+	if kBig == CacheKey("p", "m", imageMessages(bigOther), p) {
+		t.Error("不同图片不应命中同一 key")
+	}
+	// 键长与图片体积无关（避免超长键拖慢哈希与存储）
+	kSmall := CacheKey("p", "m", imageMessages(small), p)
+	if len(kBig) != len(kSmall) || len(kBig) > 128 {
+		t.Errorf("键长应与图片体积无关：big=%d small=%d", len(kBig), len(kSmall))
+	}
+	// mime 不同但正文相同 → 键不同（类型也是输入的一部分）
+	jpeg := "data:image/jpeg;base64," + strings.Repeat("A", 200_000)
+	if kBig == CacheKey("p", "m", imageMessages(jpeg), p) {
+		t.Error("不同 mime 应得到不同 key")
+	}
+}
+
+func TestDigestDataURL(t *testing.T) {
+	// 非 data URL 原样返回
+	const remote = "https://example.com/a.png"
+	if got := digestDataURL(remote); got != remote {
+		t.Errorf("外链不应改写，得到 %q", got)
+	}
+	// data URL 替换为摘要，且保留 mime 前缀
+	got := digestDataURL("data:image/png;base64,AAAA")
+	if !strings.HasPrefix(got, "data:image/png;base64,sha256-") {
+		t.Errorf("应保留 mime 并换成摘要，得到 %q", got)
+	}
+	// 相同内容 → 相同摘要；不同内容 → 不同摘要
+	a := digestDataURL("data:image/png;base64,AAAA")
+	b := digestDataURL("data:image/png;base64,AAAB")
+	if a == b {
+		t.Error("不同内容摘要不应相同")
+	}
+	// 没有 base64 标记的原样返回
+	if got := digestDataURL("data:image/png,AAAA"); got != "data:image/png,AAAA" {
+		t.Errorf("无 base64 标记的 data URL 不应改写，得到 %q", got)
+	}
+}
+
+func TestNormalizeForHashKeepsOtherParts(t *testing.T) {
+	msgs := imageMessages("data:image/png;base64,AAAA")
+	out := normalizeForHash(msgs)
+	if len(out) != 1 || len(out[0].Parts) != 2 {
+		t.Fatalf("结构应保持，得到 %+v", out)
+	}
+	if out[0].Role != llms.ChatMessageTypeHuman {
+		t.Errorf("role 应保留，得到 %v", out[0].Role)
+	}
+	if tc, ok := out[0].Parts[0].(llms.TextContent); !ok || tc.Text != "ocr" {
+		t.Errorf("文本部分不应被改写，得到 %#v", out[0].Parts[0])
+	}
+	// 原消息未被就地修改（深拷贝）：调用方的 URL 仍应是未摘要的原文
+	const original = "data:image/png;base64,AAAA"
+	if img, ok := msgs[0].Parts[1].(llms.ImageURLContent); !ok || img.URL != original {
+		t.Errorf("应深拷贝，不修改调用方传入的消息，得到 %q", msgs[0].Parts[1])
 	}
 }
 

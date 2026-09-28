@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
@@ -61,11 +62,43 @@ type cacheParams struct {
 	N           int
 }
 
+// dataURLMarker 多模态图片在 data URL 中 base64 正文的分隔标记。
+const dataURLMarker = ";base64,"
+
+// digestDataURL 把 data URL 的 base64 正文替换为 sha256 摘要（保留 mime 前缀
+// 以区分图片类型）。多模态消息的 base64 可达数 MB，整段参与哈希既让键极长、
+// 又重复付出哈希计算开销；同一张图经服务端统一编码后字节稳定，摘要即可区分。
+func digestDataURL(u string) string {
+	i := strings.Index(u, dataURLMarker)
+	if i < 0 {
+		return u
+	}
+	body := u[i+len(dataURLMarker):]
+	sum := sha256.Sum256([]byte(body))
+	return u[:i] + dataURLMarker + "sha256-" + hex.EncodeToString(sum[:16])
+}
+
+// normalizeForHash 深拷贝消息并把其中的图片 data URL 换成摘要形式（其余部分不变）。
+func normalizeForHash(messages []llms.MessageContent) []llms.MessageContent {
+	out := make([]llms.MessageContent, len(messages))
+	for i, m := range messages {
+		out[i] = llms.MessageContent{Role: m.Role, Parts: make([]llms.ContentPart, len(m.Parts))}
+		for j, part := range m.Parts {
+			if img, ok := part.(llms.ImageURLContent); ok {
+				out[i].Parts[j] = llms.ImageURLContent{URL: digestDataURL(img.URL)}
+				continue
+			}
+			out[i].Parts[j] = part
+		}
+	}
+	return out
+}
+
 // CacheKey 计算缓存键：sha256(provider, model, messagesJSON, paramsJSON)。
-// messages 为已构造的 langchaingo 结构（多模态图片以 data URL 形式内联，
-// 同一张图经服务端统一编码后字符串稳定，可安全参与哈希）。
+// messages 为已构造的 langchaingo 结构；多模态图片以 data URL 形式内联，
+// 参与哈希前先替换为内容摘要（见 digestDataURL），键长恒定。
 func CacheKey(provider, model string, messages []llms.MessageContent, p cacheParams) string {
-	mj, err := json.Marshal(messages)
+	mj, err := json.Marshal(normalizeForHash(messages))
 	if err != nil {
 		return ""
 	}

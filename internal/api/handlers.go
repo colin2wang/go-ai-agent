@@ -25,7 +25,7 @@ func ctxBackground() context.Context { return context.Background() }
 
 // Register 挂载全部路由。
 func (s *Server) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /swagger/", httpSwagger.WrapHandler)
+	mux.HandleFunc("GET /swagger/", s.handleSwagger)
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/features", s.handleFeatures)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
@@ -41,6 +41,17 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/jobs/{id}/events", s.handleJobEvents) // 异步任务进度 SSE
 	// 内嵌 SPA 前端（根路径及未知路径回退 index.html）
 	mux.Handle("GET /", staticHandler())
+}
+
+// handleSwagger Swagger UI：配置关闭时返回 404，避免在生产环境暴露接口文档。
+func (s *Server) handleSwagger(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Server.SwaggerOn() {
+		fail(w, http.StatusNotFound, "接口文档已在配置中关闭（server.swagger-enabled: false）")
+		return
+	}
+	// httpSwagger.WrapHandler 本身就是 http.HandlerFunc（签名 func(w, r)），
+	// 直接以 (w, r) 调用即可，不需要也不能先调用一次拿返回值。
+	httpSwagger.WrapHandler(w, r)
 }
 
 // ServeHTTP 实现 http.Handler；配置了 server.api-tokens 时对 /api/* 强制鉴权
