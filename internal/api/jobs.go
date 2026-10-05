@@ -207,12 +207,16 @@ func (s *Server) lookupJob(id string) (*JobResult, bool) {
 }
 
 // handleJobList godoc
-// @Summary      最近任务列表
-// @Description  返回最近的异步任务（不含结果正文），query: n（条数，默认 50，上限 200）
+// @Summary      任务列表
+// @Description  返回异步任务（不含结果正文），支持过滤与分页：
+// @Description  query: feature（子功能 id）、status（pending/running/done/failed）、n（每页条数，默认 50，上限 200）、offset（偏移量）
 // @Tags         jobs
 // @Produce      json
-// @Param        n  query  int  false  "条数"
-// @Success      200  {object}  map[string]any  "jobs: JobResult 数组"
+// @Param        feature  query  string  false  "按子功能 id 过滤"
+// @Param        status   query  string  false  "按状态过滤"
+// @Param        n        query  int     false  "每页条数（默认 50，上限 200）"
+// @Param        offset   query  int     false  "分页偏移量"
+// @Success      200  {object}  map[string]any  "jobs: JobResult 数组；total: 过滤条件下的总条数"
 // @Router       /api/jobs [get]
 func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) {
 	store := s.jobsStore()
@@ -220,13 +224,25 @@ func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusOK, map[string]any{"jobs": []JobResult{}, "persistent": false})
 		return
 	}
+	q := r.URL.Query()
 	n := 50
-	if v := r.URL.Query().Get("n"); v != "" {
+	if v := q.Get("n"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
 			n = parsed
 		}
 	}
-	rows, err := store.List(n)
+	offset := 0
+	if v := q.Get("offset"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			offset = parsed
+		}
+	}
+	rows, err := store.Query(stats.JobFilter{
+		Feature: q.Get("feature"),
+		Status:  q.Get("status"),
+		Limit:   n,
+		Offset:  offset,
+	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
@@ -236,7 +252,12 @@ func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) {
 		view := jobView(row)
 		out = append(out, *view)
 	}
-	respond(w, http.StatusOK, map[string]any{"jobs": out, "persistent": true})
+	respond(w, http.StatusOK, map[string]any{
+		"jobs":       out,
+		"persistent": true,
+		"limit":      n,
+		"offset":     offset,
+	})
 }
 
 // handleJobEvents godoc

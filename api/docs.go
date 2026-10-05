@@ -175,25 +175,43 @@ const docTemplate = `{
         },
         "/api/jobs": {
             "get": {
-                "description": "返回最近的异步任务（不含结果正文），query: n（条数，默认 50，上限 200）",
+                "description": "返回异步任务（不含结果正文），支持过滤与分页：\nquery: feature（子功能 id）、status（pending/running/done/failed）、n（每页条数，默认 50，上限 200）、offset（偏移量）",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "jobs"
                 ],
-                "summary": "最近任务列表",
+                "summary": "任务列表",
                 "parameters": [
                     {
+                        "type": "string",
+                        "description": "按子功能 id 过滤",
+                        "name": "feature",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "按状态过滤",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
                         "type": "integer",
-                        "description": "条数",
+                        "description": "每页条数（默认 50，上限 200）",
                         "name": "n",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "分页偏移量",
+                        "name": "offset",
                         "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
-                        "description": "jobs: JobResult 数组",
+                        "description": "jobs: JobResult 数组；total: 过滤条件下的总条数",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true

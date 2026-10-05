@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,11 @@ var ErrJobNotFound = errors.New("job not found")
 
 // initAuxTables 建辅助表（幂等），旧库升级后首次启动自动补齐。
 func initAuxTables(db *sql.DB) error {
+	// 兼容旧库：先补齐后加的列（列已存在时必然报错，忽略）。
+	// 必须在建索引之前执行，否则旧库上 CREATE INDEX ... (last_access_ms) 会
+	// 因「列不存在」失败，导致 Open 直接报错。
+	_, _ = db.Exec(`ALTER TABLE llm_cache ADD COLUMN last_access_ms INTEGER`)
+
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS jobs (
 			id TEXT PRIMARY KEY,
@@ -57,9 +63,12 @@ func initAuxTables(db *sql.DB) error {
 			completion_tokens INT,
 			created_at_ms INTEGER,
 			expires_at_ms INTEGER,
-			hit_count INT
+			hit_count INT,
+			last_access_ms INTEGER
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_llm_cache_expires ON llm_cache(expires_at_ms)`,
+		// 容量淘汰按「最近访问」排序（LRU），热点条目不会被冷数据挤出
+		`CREATE INDEX IF NOT EXISTS idx_llm_cache_access ON llm_cache(last_access_ms)`,
 	}
 	for _, q := range stmts {
 		if _, err := db.Exec(q); err != nil {
@@ -173,20 +182,56 @@ func (s *JobStore) Get(id string) (JobRow, error) {
 
 // List 返回最近 n 条任务（不含 result，避免把大字段带进列表接口）。n<=0 取 50。
 func (s *JobStore) List(n int) ([]JobRow, error) {
+	return s.Query(JobFilter{Limit: n})
+}
+
+// JobFilter 任务列表筛选条件（零值字段 = 不筛选）。
+type JobFilter struct {
+	Feature string // 按子功能 id 精确匹配
+	Status  string // 按状态精确匹配（pending/running/done/failed）
+	Limit   int    // 每页条数（<=0 或 >200 归一为 50）
+	Offset  int    // 分页偏移（<0 归一为 0）
+}
+
+// Query 按条件查询任务（不含 result），按创建时间倒序。
+// 所有条件可选，便于前端按子功能/状态过滤与翻页。
+func (s *JobStore) Query(f JobFilter) ([]JobRow, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
-	if n <= 0 || n > 200 {
-		n = 50
+	if f.Limit <= 0 || f.Limit > 200 {
+		f.Limit = 50
 	}
-	rows, err := s.db.Query(`SELECT id, feature_id, status, progress, total,
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+	q := `SELECT id, feature_id, status, progress, total,
 			COALESCE(detail, ''), COALESCE(error, ''), created_at_ms, updated_at_ms
-		FROM jobs ORDER BY created_at_ms DESC LIMIT ?`, n)
+		FROM jobs`
+	var (
+		where []string
+		args  []any
+	)
+	if f.Feature != "" {
+		where = append(where, "feature_id = ?")
+		args = append(args, f.Feature)
+	}
+	if f.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, f.Status)
+	}
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY created_at_ms DESC LIMIT ? OFFSET ?"
+	args = append(args, f.Limit, f.Offset)
+
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list jobs: %w", err)
+		return nil, fmt.Errorf("query jobs: %w", err)
 	}
 	defer rows.Close()
-	out := make([]JobRow, 0, n)
+	out := make([]JobRow, 0, f.Limit)
 	for rows.Next() {
 		var (
 			row              JobRow
@@ -357,9 +402,11 @@ type CacheEntry struct {
 	PromptTokens     int
 	CompletionTokens int
 	ExpiresAtMS      int64
+	LastAccessMS     int64 // 最近命中时间（LRU 淘汰排序用；未命中过为 0）
 }
 
-// CacheGet 按 key 命中未过期的缓存回答（命中计数 +1，供概览展示收益）。
+// CacheGet 按 key 命中未过期的缓存回答（命中计数 +1 并刷新最近访问时间，
+// 供概览展示收益、供容量淘汰按 LRU 排序）。
 func (r *Recorder) CacheGet(key string) (CacheEntry, bool) {
 	var out CacheEntry
 	if r == nil || r.db == nil {
@@ -374,7 +421,10 @@ func (r *Recorder) CacheGet(key string) (CacheEntry, bool) {
 	if err != nil {
 		return out, false
 	}
-	_, _ = r.db.Exec(`UPDATE llm_cache SET hit_count = COALESCE(hit_count, 0) + 1 WHERE key = ?`, key)
+	now := time.Now().UnixMilli()
+	_, _ = r.db.Exec(`UPDATE llm_cache
+		SET hit_count = COALESCE(hit_count, 0) + 1, last_access_ms = ? WHERE key = ?`, now, key)
+	out.LastAccessMS = now
 	return out, true
 }
 
@@ -439,7 +489,9 @@ func (a *CacheStoreAdapter) CachePut(key, provider, model, answer, reasoning str
 	}, expiresAt)
 }
 
-// PruneCache 清理过期缓存行并把行数压到 maxRows 以内（淘汰最旧写入）。
+// PruneCache 清理过期缓存行并把行数压到 maxRows 以内。
+// 容量淘汰按 LRU：以「最近访问时间」为准（从未命中的条目回退到写入时间），
+// 保留最近使用过的 maxRows 条——纯 FIFO（按写入时间）会把热点数据挤出。
 func (r *Recorder) PruneCache(maxRows int) (dropped, trimmed int64, err error) {
 	if r == nil || r.db == nil {
 		return 0, 0, nil
@@ -454,7 +506,8 @@ func (r *Recorder) PruneCache(maxRows int) (dropped, trimmed int64, err error) {
 		return dropped, 0, nil
 	}
 	res, err = r.db.Exec(`DELETE FROM llm_cache WHERE key IN (
-		SELECT key FROM llm_cache ORDER BY created_at_ms DESC LIMIT -1 OFFSET ?)`, maxRows)
+		SELECT key FROM llm_cache
+		ORDER BY COALESCE(last_access_ms, created_at_ms) DESC LIMIT -1 OFFSET ?)`, maxRows)
 	if err != nil {
 		return dropped, 0, fmt.Errorf("trim cache: %w", err)
 	}

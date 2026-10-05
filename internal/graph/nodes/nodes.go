@@ -107,25 +107,40 @@ func (d Deps) call(ctx context.Context, stepName, provider, model string,
 	if d.cacheForStep(stepName) {
 		ctx = llm.WithCacheEnabled(ctx, true)
 	}
+	// 重试循环与具体调用方式解耦：fn 可替换为任意序列（便于单测覆盖退避行为）。
+	return retryLoop(ctx, retryPolicy{Max: d.RetryMax, BackoffMS: d.RetryBackoffMS}, stepName,
+		func() (string, error) {
+			return d.callOnce(ctx, chat, stepName, messages, temperature, maxTokens)
+		})
+}
 
-	attempts := d.RetryMax
-	if attempts < 0 {
-		attempts = 0
+// retryPolicy 单次调用内的重试策略（Max 为「额外」尝试次数，不含首次）。
+type retryPolicy struct {
+	Max       int // <=0 归一为 0（不重试）
+	BackoffMS int // 退避基数（毫秒，<=0 = 不退避立即重试）
+}
+
+// retryLoop 按策略执行 fn：成功即返回；失败且可重试则退避后再次尝试，
+// 最多额外 Max 次；不可重试错误、次数耗尽或 ctx 取消时立即返回最后错误。
+// 与具体调用方式解耦，便于用可控的错误序列验证退避行为。
+func retryLoop(ctx context.Context, pol retryPolicy, stepName string, fn func() (string, error)) (string, error) {
+	if pol.Max < 0 {
+		pol.Max = 0
 	}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		text, err := d.callOnce(ctx, chat, stepName, messages, temperature, maxTokens)
+		text, err := fn()
 		if err == nil {
 			return text, nil
 		}
 		lastErr = err
-		if attempt >= attempts || !retryableErr(err) {
+		if attempt >= pol.Max || !retryableErr(err) {
 			return "", lastErr
 		}
 		slog.Warn("步骤调用失败，准备重试",
 			slog.String("step", stepName), slog.Int("attempt", attempt+1),
-			slog.Int("max", attempts), slog.String("error", err.Error()))
-		if !sleepBackoff(ctx, d.RetryBackoffMS, attempt) {
+			slog.Int("max", pol.Max), slog.String("error", err.Error()))
+		if !sleepBackoff(ctx, pol.BackoffMS, attempt, err) {
 			return "", lastErr // 等待期间 ctx 取消，不再重试
 		}
 	}
@@ -209,17 +224,65 @@ func errorCode(m string) int {
 	return n
 }
 
-// sleepBackoff 指数退避（base × 2^attempt，上限 30s，带 ±25% 抖动）；
-// ctx 提前取消时返回 false。base<=0 时不等待（保持旧行为：立即重试）。
-func sleepBackoff(ctx context.Context, baseMS, attempt int) bool {
+// maxBackoff 指数退避的等待上限（避免极端 base 把工作流拖死）。
+const maxBackoff = 30 * time.Second
+
+// maxRetryAfter 遵循端点 Retry-After 时的等待上限。
+const maxRetryAfter = 60 * time.Second
+
+// retryAfterRe 从错误消息中提取 Retry-After 提示（秒或毫秒）。
+// langchaingo 不透出响应头，但 OpenAI 兼容端点常把限流提示带在错误正文里
+// （形如 "Retry-After: 30"、'{"error":{"message":"...retry after 1500ms"}}'），
+// 此时应优先遵循端点指示，而不是按固定指数退避过早重试加剧限流。
+var retryAfterRe = regexp.MustCompile(`(?i)retry[- ]?after\D{0,8}(\d+)\s*(ms|s)?`)
+
+// retryAfterFromErr 解析端点给出的重试等待时长；解析不到返回 (0, false)。
+func retryAfterFromErr(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	g := retryAfterRe.FindStringSubmatch(err.Error())
+	if len(g) < 2 {
+		return 0, false
+	}
+	n, convErr := strconv.Atoi(g[1])
+	if convErr != nil || n <= 0 {
+		return 0, false
+	}
+	d := time.Duration(n) * time.Second
+	if len(g) > 2 && strings.EqualFold(g[2], "ms") {
+		d = time.Duration(n) * time.Millisecond
+	}
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	return d, true
+}
+
+// backoffDelay 计算本次重试的等待时长：端点给出 Retry-After 时优先遵循，
+// 否则按指数退避（base × 2^attempt，上限 maxBackoff）。base<=0 时为 0（立即重试）。
+func backoffDelay(baseMS, attempt int, err error) time.Duration {
+	if d, ok := retryAfterFromErr(err); ok {
+		return d
+	}
 	if baseMS <= 0 {
-		return ctx.Err() == nil
+		return 0
 	}
 	d := time.Duration(baseMS) * time.Millisecond * time.Duration(1<<min(attempt, 5))
-	if d > 30*time.Second {
-		d = 30 * time.Second
+	if d > maxBackoff {
+		d = maxBackoff
 	}
-	d += time.Duration(rand.Int63n(int64(d)/4+1)) - d/8 // 抖动，避免并发页同时重试踩同一坑
+	return d
+}
+
+// sleepBackoff 等待一次重试间隔（带 ±25% 抖动，避免并发页同时重试踩同一坑）；
+// ctx 提前取消时返回 false。等待时长为 0 时不挂起（保持旧行为：立即重试）。
+func sleepBackoff(ctx context.Context, baseMS, attempt int, err error) bool {
+	d := backoffDelay(baseMS, attempt, err)
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	d += time.Duration(rand.Int63n(int64(d)/4+1)) - d/8
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -302,6 +365,19 @@ func (d Deps) stepPrompt(name string) (system, user string) {
 // 规避该问题，同时保持文本清晰可读。
 const maxImageLongEdge = 1600
 
+// maxDecodePixels 允许本地解码的最大像素数（防解码炸弹）。
+// 常规扫描件远低于此：A4 300dpi ≈ 8.7MP、手机照片约 12MP，留足余量。
+const maxDecodePixels = 50_000_000
+
+// decodeDimensions 只读取图片头取得宽高（不解码像素数据，开销恒定且极小）。
+func decodeDimensions(data []byte) (w, h int, ok bool) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0, false
+	}
+	return cfg.Width, cfg.Height, true
+}
+
 // imageDataURL 将图片字节编码为标准 OpenAI 多模态 data URL（image_url.url）。
 // 发送前会：1) 按实际内容（magic bytes）推断 MIME，避免扩展名与内容不符导致
 // 后端无法解码而静默返回空；2) 对超长边图片做等比缩小，降低视觉 token 量。
@@ -317,6 +393,16 @@ func imageDataURL(declaredMime string, data []byte) string {
 	out, outMime := data, mime
 	switch mime {
 	case "image/png", "image/jpeg", "image/gif":
+		// 解码前先看头部声明的宽高：恶意/异常图片可以极小体积声明超大尺寸
+		// （解码炸弹），一次 image.Decode 就会按 宽×高×4 字节吃满内存。
+		// 超限时不解码、不缩放，原样转发给端点（端点处理不了会正常报错），
+		// 而不是让进程 OOM。
+		if w, h, ok := decodeDimensions(data); ok && int64(w)*int64(h) > maxDecodePixels {
+			slog.Warn("图片像素数超限，跳过本地缩放直接发送",
+				slog.Int("width", w), slog.Int("height", h),
+				slog.Int64("pixels", int64(w)*int64(h)), slog.Int("limit", maxDecodePixels))
+			break
+		}
 		if src, _, err := image.Decode(bytes.NewReader(data)); err == nil {
 			resized := downscale(src, maxImageLongEdge)
 			var buf bytes.Buffer

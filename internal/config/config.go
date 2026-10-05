@@ -48,6 +48,16 @@ type Server struct {
 	ShutdownTimeoutSeconds   int      `yaml:"shutdown-timeout-seconds"`
 	APITokens                []string `yaml:"api-tokens"` // 对外调用令牌（为空 = 不鉴权，本机单用户体验不变）
 	AuthExcludeHealth        bool     `yaml:"auth-exclude-health"`
+	SwaggerEnabled           *bool    `yaml:"swagger-enabled"` // nil = 开启（本机默认）；显式 false = 关闭接口文档
+}
+
+// SwaggerOn 是否暴露 Swagger UI：未配置时保持开启，显式 false 关闭。
+// 生产环境建议关闭——接口文档会列出全部端点，属于额外的攻击面。
+func (s Server) SwaggerOn() bool {
+	if s.SwaggerEnabled == nil {
+		return true
+	}
+	return *s.SwaggerEnabled
 }
 
 // Storage LLM 调用统计落库配置。

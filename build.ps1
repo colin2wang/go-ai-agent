@@ -92,6 +92,8 @@ pnpm install failed.
   (or run 'pnpm approve-builds' inside web/), then rerun .\build.ps1
 "@
         }
+        pnpm run test
+        if ($LASTEXITCODE -ne 0) { Write-Error "frontend tests failed" }
         pnpm run build
         if ($LASTEXITCODE -ne 0) { Write-Error "frontend build failed" }
     } finally { Pop-Location }

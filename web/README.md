@@ -15,6 +15,7 @@ AI 工作流平台的 Web UI：Vue3 + TypeScript + Vite 单页应用。左侧主
 | marked | ^15 | Markdown 渲染（GFM + `breaks`，换行即 `<br>`，适配聊天场景） |
 | DOMPurify | ^3.2 | 渲染后的 HTML 消毒，防模型输出携带 XSS |
 | vue-tsc | ^2.2 | `pnpm build` 前的全量类型检查（`vue-tsc -b`） |
+| vitest | ^3 | 单元测试：`sse.test.ts`（SSE 解析器）+ `api.test.ts`（mock fetch），`pnpm test` 运行；根目录 `build.ps1` 在构建前执行 |
 
 包管理器为 **pnpm**（锁文件 `pnpm-lock.yaml`）。`pnpm-workspace.yaml` 中的 `allowBuilds: esbuild: true`
 是 pnpm ≥ 10 的构建脚本白名单：esbuild 需要 install 脚本链接平台二进制，未批准会导致 `pnpm install`
@@ -39,6 +40,7 @@ cd dist
 |---|---|
 | `pnpm dev` | Vite 开发服务器（端口 5173），`vite.config.ts` 将 `/api` 代理到后端 8080，SSE 流式响应可直连调试 |
 | `pnpm build` | `vue-tsc -b` 类型检查 + `vite build`，产物在 `web/dist/` |
+| `pnpm test` | `vitest run`：SSE 解析器与 `api.ts` 请求封装的单测（无浏览器依赖） |
 | `pnpm preview` | 本地预览构建产物 |
 
 ## 与后端的集成方式
@@ -64,7 +66,10 @@ web/
 └── src/
     ├── main.ts             # createApp(App)
     ├── App.vue             # 壳层：健康探测 + 特性加载 + 视图分派（overview / chat / workflow）
-    ├── api.ts              # 全部 REST 封装 + sendChat SSE 解析器（fetch + ReadableStream 手搓）
+    ├── api.ts              # 全部 REST 封装 + sendChat（SSE 事件派发）
+    ├── sse.ts              # SSE 增量解析器（事件跨 chunk / CRLF / 多行 data），纯函数便于单测
+    ├── sse.test.ts         # SSE 解析器单测：跨 chunk、CRLF、多行 data、末尾无分隔符等边界
+    ├── api.test.ts         # sendChat / runFeatureAsync 单测（mock fetch + ReadableStream）
     ├── types.ts            # 与 Go 端 JSON 对齐的接口类型（单一事实来源）
     ├── chart.ts            # SVG 路径计算（线性缩放 / Catmull-Rom 平滑 / 面积闭合）与数值格式化
     ├── markdown.ts         # marked + DOMPurify 的 renderMarkdown
@@ -88,8 +93,12 @@ web/
 - `types.ts` 与 Go 端 handler 响应体一一对应（`FeatureInfo`、`JobResult`、`OverviewStats`、`ModelCaps`、
   `ChatCollectResponse` 等），后端字段变更时须同步修改此文件。
 - 全部请求走 `api.ts`：普通请求 `fetch + JSON`（统一提取 `{error}` 错误体抛异常）；
-  对话发送 `sendChat()` 手写 SSE 解析——按空行切事件、`event:`/`data:` 行分发 `meta` / `delta` / `done` 回调，
+  对话发送 `sendChat()` 走 `fetch + ReadableStream`，逐 chunk 交给 `sse.ts` 的增量解析器，
+  再按事件名分发 `meta` / `delta` / `done` 回调；
   响应 Content-Type 非 `text/event-stream` 时按一次性 JSON（`ChatCollectResponse`）返回。
+- SSE 解析刻意从 `api.ts` 抽出：事件会被网络分片截断在任意位置、服务端也可能用 CRLF 换行
+  （早期内联实现只认 `\n\n`，CRLF 下事件会整段丢失）。抽成纯函数后这些边界都能用单测覆盖，
+  见 `sse.test.ts`；流结束时还要 `flush()` 一次，取回未以空行结尾的最后一个事件。
 
 ## 视图说明
 
@@ -143,3 +152,4 @@ web/
 | dev 页面报「后端不可用」 | 确认 harness 已以 `-addr :8080` 启动（代理目标写死 8080，默认 8000 需改 `vite.config.ts` 或换启动参数） |
 | dev 下对话 SSE 无输出 | SSE 经 Vite 代理一般可透传；若异常先用 `-addr :8080` 启动后端 + 直接访问 8080 端口排查 |
 | 改了前端但 exe 里没生效 | 前端嵌入二进制，需重跑根目录 `.\build.ps1` 重新编译 |
+| `pnpm test` 提示找不到 `vitest` | vitest 是新增的 devDependency，先在 `web/` 执行 `pnpm install` |

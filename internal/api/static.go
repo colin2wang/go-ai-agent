@@ -17,6 +17,21 @@ var webdist embed.FS
 // 缓存策略：/assets/* 由 vite 打内容哈希，可长期 immutable 缓存；
 // 其余（尤其 index.html）必须 no-cache，否则前端重新构建后浏览器仍会沿用
 // 旧的入口页与旧 JS（表现为“改了前端但页面行为没变”，例如 Markdown 不渲染）。
+// cspPolicy 前端页面的内容安全策略（对 DOMPurify 之外再补一道防线）。
+// 说明：Vue 运行时与组件内联样式需要 style-src 'unsafe-inline'；
+// 图片走 data:/blob:（本地预览与 LLM 多模态回传），故放开 img-src。
+var cspPolicy = strings.Join([]string{
+	"default-src 'self'",
+	"script-src 'self'",
+	"style-src 'self' 'unsafe-inline'",
+	"img-src 'self' data: blob:",
+	"font-src 'self' data:",
+	"connect-src 'self'",
+	"object-src 'none'",
+	"base-uri 'self'",
+	"frame-ancestors 'none'",
+}, "; ")
+
 func staticHandler() http.Handler {
 	sub, err := fs.Sub(webdist, "webdist")
 	if err != nil {
@@ -38,6 +53,10 @@ func staticHandler() http.Handler {
 		} else {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
+		// HTML 页面统一加 CSP（静态资源同样下发，策略对它们无副作用）
+		w.Header().Set("Content-Security-Policy", cspPolicy)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		fileServer.ServeHTTP(w, r)
 	})
 }
