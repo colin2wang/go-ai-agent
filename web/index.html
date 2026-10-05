@@ -8,6 +8,14 @@
     <link rel="apple-touch-icon" href="/favicon.svg" />
   </head>
   <body>
+    <script>
+      // 防闪烁：渲染前先从 localStorage 恢复主题
+      try {
+        if (localStorage.getItem('harness.theme') === 'terminal') {
+          document.documentElement.dataset.theme = 'terminal'
+        }
+      } catch (e) {}
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

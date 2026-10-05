@@ -29,6 +29,85 @@
 
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 8px 24px rgba(16, 24, 40, 0.045);
   --sidebar-w: 252px;
+
+  /* 语义别名：供组件引用，避免硬编码浅色值 */
+  --on-accent: #fff;
+  --scrim: rgba(20, 20, 24, 0.72);
+  --code-bg: #1d1d1f;
+  --code-fg: #f5f5f7;
+  --grid-line: #e6e6ec;
+  --hairline: #fff;
+  --ok-strong: #1f9d4d;
+  --bad-strong: #d13b30;
+  --warn-strong: #a86700;
+  --warn-deep: #8a5600;
+  --track: #d9d9e0;
+}
+
+/* ==========================================================================
+ * 终端主题：深色 CRT 风（等宽字体 + 虚线边框 + 霓虹强调色）
+ * 配色参考外部 agent-harness-console 项目
+ * ========================================================================== */
+:root[data-theme='terminal'] {
+  --bg: #16161f;
+  --surface: #101018;
+  --surface-2: #1b1b26;
+  --border: #2c2c40;
+  --text: #d8dbe6;
+  --text-2: #8a8fa8;
+  --text-3: #5a5e78;
+
+  --green: #58e6a0;
+  --green-soft: rgba(88, 230, 160, 0.12);
+  --blue: #7f9cff;
+  --blue-soft: rgba(127, 156, 255, 0.12);
+  --purple: #c99cff;
+  --purple-soft: rgba(201, 156, 255, 0.12);
+  --orange: #ffd479;
+  --orange-soft: rgba(255, 212, 121, 0.12);
+  --red: #ff6b81;
+  --red-soft: rgba(255, 107, 129, 0.12);
+
+  --radius-lg: 10px;
+  --radius: 8px;
+  --radius-sm: 5px;
+
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --sidebar-w: 252px;
+
+  --on-accent: #16161f;
+  --scrim: rgba(0, 0, 0, 0.6);
+  --code-bg: #0b0b12;
+  --code-fg: #d8dbe6;
+  --grid-line: #232334;
+  --hairline: var(--surface);
+  --ok-strong: #58e6a0;
+  --bad-strong: #ff6b81;
+  --warn-strong: #ffd479;
+  --warn-deep: #ffd479;
+  --track: #2c2c40;
+}
+
+:root[data-theme='terminal'] body {
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo,
+    Consolas, 'Liberation Mono', monospace;
+  font-size: 13px;
+}
+
+/* CRT 扫描线 + 暗角，低调到几乎不可见 */
+:root[data-theme='terminal'] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at center, transparent 62%, rgba(0, 0, 0, 0.38) 100%);
+  z-index: 9999;
+}
+
+:root[data-theme='terminal'] ::selection {
+  background: rgba(111, 227, 255, 0.28);
 }
 
 * {
@@ -84,13 +163,13 @@ pre {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #dcdce2;
+  background: var(--text-3);
   border-radius: 999px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #c9c9d1;
+  background: var(--text-2);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-track {
@@ -148,8 +227,8 @@ pre {
 }
 
 .segmented button.active {
-  background: #1d1d1f;
-  color: #fff;
+  background: var(--text);
+  color: var(--bg);
 }
 
 /* ---- 按钮 ---- */
@@ -160,8 +239,8 @@ pre {
   gap: 8px;
   padding: 10px 18px;
   border-radius: 12px;
-  background: #1d1d1f;
-  color: #fff;
+  background: var(--text);
+  color: var(--bg);
   font-size: 13.5px;
   font-weight: 600;
   transition: opacity 0.14s ease, transform 0.12s ease;
@@ -216,5 +295,225 @@ pre {
   box-shadow: 0 0 0 3px var(--red-soft);
 }
 .dot.wait {
+  background: var(--text-3);
+}
+
+/* ==========================================================================
+ * 终端主题 — 结构改造：整页呈现为终端控制台
+ * （窗口框 / 虚线面板 / 终端按钮 / 表格 / 侧边栏，仅 terminal 主题生效）
+ * ========================================================================== */
+
+/* ---- 整页终端窗口 ---- */
+:root[data-theme='terminal'] body {
+  padding: 14px 16px 28px;
+}
+
+:root[data-theme='terminal'] .term-window {
+  max-width: 1440px;
+  margin: 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  overflow: clip;
+  min-height: calc(100vh - 42px);
+  display: flex;
+  flex-direction: column;
+}
+
+/* 浅色主题下这些结构节点保持透明，不影响原布局 */
+.term-titlebar {
+  display: none;
+}
+
+:root[data-theme='terminal'] .term-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+:root[data-theme='terminal'] .term-lights {
+  display: flex;
+  gap: 6px;
+}
+
+:root[data-theme='terminal'] .term-lights span {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+
+:root[data-theme='terminal'] .term-lights .l-r { background: #ff5f57; }
+:root[data-theme='terminal'] .term-lights .l-y { background: #febc2e; }
+:root[data-theme='terminal'] .term-lights .l-g { background: #28c840; }
+
+:root[data-theme='terminal'] .term-title {
+  flex: 1;
+  text-align: center;
+  color: var(--text-3);
+}
+
+:root[data-theme='terminal'] .term-titlebar-spacer {
+  width: 45px;
+}
+
+:root[data-theme='terminal'] .shell {
+  flex: 1;
+}
+
+/* ---- 卡片 → 虚线面板 ---- */
+:root[data-theme='terminal'] .card {
+  border-style: dashed;
+  border-radius: 6px;
+  box-shadow: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 40%);
+}
+
+:root[data-theme='terminal'] .card-head {
+  padding-top: 14px;
+}
+
+:root[data-theme='terminal'] .card-title {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+
+:root[data-theme='terminal'] .page-title {
+  letter-spacing: 0.14em;
+}
+
+/* ---- 按钮 → 终端按钮 ---- */
+:root[data-theme='terminal'] .btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  box-shadow: none;
+}
+
+:root[data-theme='terminal'] .btn:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+  opacity: 1;
+}
+
+:root[data-theme='terminal'] .btn.ghost {
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+:root[data-theme='terminal'] .btn.ghost:hover:not(:disabled) {
+  border-color: var(--cyan, var(--blue));
+}
+
+/* ---- 分段控件 → 终端 chip 组 ---- */
+:root[data-theme='terminal'] .segmented {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+}
+
+:root[data-theme='terminal'] .segmented button {
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+}
+
+:root[data-theme='terminal'] .segmented button.active {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+/* ---- 标签 → 方角 chip ---- */
+:root[data-theme='terminal'] .tag {
+  border-radius: 3px;
+  letter-spacing: 0.06em;
+  font-size: 10.5px;
+}
+
+/* ---- 表格 ---- */
+:root[data-theme='terminal'] table {
+  font-size: 12px;
+}
+
+:root[data-theme='terminal'] th {
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+/* ---- 侧边栏 → 终端导航面板 ---- */
+:root[data-theme='terminal'] .sidebar {
+  background: transparent;
+  backdrop-filter: none;
+  border-right-style: dashed;
+}
+
+:root[data-theme='terminal'] .nav-group {
+  letter-spacing: 0.14em;
+}
+
+:root[data-theme='terminal'] .nav-item {
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+:root[data-theme='terminal'] .nav-item.active {
+  background: var(--purple-soft);
+  color: var(--purple);
+  box-shadow: none;
+}
+
+:root[data-theme='terminal'] .nav-item.active :deep(svg) {
+  color: var(--purple);
+}
+
+:root[data-theme='terminal'] .status {
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: transparent;
+  letter-spacing: 0.04em;
+}
+
+/* ---- 输入框 / 文本域 ---- */
+:root[data-theme='terminal'] input,
+:root[data-theme='terminal'] textarea,
+:root[data-theme='terminal'] select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+}
+
+:root[data-theme='terminal'] input:focus,
+:root[data-theme='terminal'] textarea:focus,
+:root[data-theme='terminal'] select:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+
+/* ---- 滚动条 → 终端细滚动条 ---- */
+:root[data-theme='terminal'] ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:root[data-theme='terminal'] ::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: none;
+  border-radius: 4px;
+}
+
+:root[data-theme='terminal'] ::-webkit-scrollbar-thumb:hover {
   background: var(--text-3);
 }

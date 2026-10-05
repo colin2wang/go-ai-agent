@@ -807,15 +807,15 @@ onBeforeUnmount(() => {
 }
 
 .cap-chip.reasoning {
-  color: #6d28d9;
-  background: #f3edfd;
-  border-color: #e0d2f8;
+  color: var(--purple);
+  background: var(--purple-soft);
+  border-color: var(--purple);
 }
 
 .cap-chip.vision {
-  color: #0369a1;
-  background: #e7f4fc;
-  border-color: #c9e6f7;
+  color: var(--blue);
+  background: var(--blue-soft);
+  border-color: var(--blue);
 }
 
 .cap-chip.plain {
@@ -866,7 +866,7 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   border-radius: 999px;
-  background: #d9d9e0;
+  background: var(--track);
   transition: background 0.16s ease;
 }
 
@@ -905,7 +905,7 @@ onBeforeUnmount(() => {
 }
 
 .stream-state.bad {
-  color: #c2362c;
+  color: var(--bad-strong);
 }
 
 .alert {
@@ -918,7 +918,7 @@ onBeforeUnmount(() => {
 
 .alert.error {
   background: var(--red-soft);
-  color: #c2362c;
+  color: var(--bad-strong);
 }
 
 /* ---- 消息区 ---- */
@@ -951,8 +951,8 @@ onBeforeUnmount(() => {
   margin: 0;
   padding: 8px 16px;
   border-radius: 999px;
-  background: #1d1d1f;
-  color: #fff;
+  background: var(--text);
+  color: var(--bg);
   font-size: 12.5px;
   font-weight: 600;
   /* 提示条不能挡住 drop 目标 */
@@ -1022,9 +1022,9 @@ onBeforeUnmount(() => {
 }
 
 .msg.user .avatar {
-  background: #1d1d1f;
-  border-color: #1d1d1f;
-  color: #fff;
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
 }
 
 .bubble-wrap {
@@ -1168,7 +1168,7 @@ onBeforeUnmount(() => {
   margin: 0 0 0.7em;
   padding: 11px 13px;
   border-radius: var(--radius-sm);
-  background: #1d1d1f;
+  background: var(--text);
   color: #f5f5f7;
   overflow-x: auto;
 }
@@ -1226,7 +1226,7 @@ onBeforeUnmount(() => {
 }
 
 .msg-error {
-  color: #c2362c;
+  color: var(--bad-strong);
   font-weight: 600;
 }
 
@@ -1354,13 +1354,13 @@ onBeforeUnmount(() => {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #1d1d1f;
-  color: #fff;
+  background: var(--text);
+  color: var(--bg);
   line-height: 1;
 }
 
 .attach-x:hover {
-  background: #c2362c;
+  background: var(--bad-strong);
 }
 
 .attach-count {
@@ -1373,7 +1373,7 @@ onBeforeUnmount(() => {
 
 .attach-error {
   margin: 0;
-  color: #c2362c;
+  color: var(--bad-strong);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1391,7 +1391,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(20, 20, 24, 0.72);
+  background: var(--scrim);
   cursor: zoom-out;
 }
 
@@ -1415,7 +1415,7 @@ onBeforeUnmount(() => {
   height: 32px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.9);
-  color: #1d1d1f;
+  color: var(--text);
 }
 
 .composer-actions {

@@ -3,7 +3,7 @@
 #             cmd/harness -> dist/harness.exe  (subcommands: serve / mq / cron / CLI)
 #
 # Pipeline:
-#   1. go test                      (optional, -SkipTests)
+#   1. go test                      (opt-in with -Test)
 #   2. swag init                    (regenerate OpenAPI docs into api/)
 #   3. pnpm install && pnpm build   (Vue3 + TS frontend, in web/)
 #   4. copy web/dist                -> internal/api/webdist (picked up by go:embed)
@@ -11,14 +11,39 @@
 #   6. copy config/ and assets/     -> dist/ (runtime files, editable after build)
 #
 # Usage:
-#   .\build.ps1                     # full build, version = "dev"
-#   .\build.ps1 -SkipTests          # skip `go test`
+#   .\build.ps1                     # full build (no tests), version = "dev"
+#   .\build.ps1 -Test               # run `go test` before building
 #   .\build.ps1 -Version v1.0.0     # inject version string (binary version)
+#   .\build.ps1 -Help               # show this help and exit
 # ============================================================================
 param(
     [string]$Version = "dev",
-    [switch]$SkipTests
+    [switch]$Test,
+    [switch]$Help
 )
+
+if ($Help) {
+    Write-Host @"
+build.ps1 - one-shot build: cmd/harness -> dist/harness.exe
+
+Usage:
+  .\build.ps1 [-Version <ver>] [-Test] [-Help]
+
+Options:
+  -Version <ver>  inject version string into the binary (default: "dev")
+  -Test           run 'go test ./...' before building (skipped by default)
+  -Help           show this help and exit
+
+Pipeline:
+  1. go test                      (opt-in with -Test)
+  2. swag init                    (regenerate OpenAPI docs into api/)
+  3. pnpm install && pnpm build   (Vue3 + TS frontend, in web/)
+  4. copy web/dist                -> internal/api/webdist (picked up by go:embed)
+  5. go build                     (embeds frontend + docs, injects version)
+  6. copy config/ and assets/     -> dist/ (runtime files, editable after build)
+"@ -ForegroundColor Cyan
+    exit 0
+}
 
 # Fail fast on any error, and always resolve paths relative to this script.
 $ErrorActionPreference = "Stop"
@@ -29,8 +54,8 @@ Set-Location $PSScriptRoot
 $OutputDir = Join-Path $PSScriptRoot "dist"
 $Commands = @("harness")
 
-# ---- Step 1: run unit tests (skipped with -SkipTests) ----
-if (-not $SkipTests) {
+# ---- Step 1: run unit tests (only with -Test) ----
+if ($Test) {
     Write-Host "==> go test ./..." -ForegroundColor Cyan
     go test ./...
     if ($LASTEXITCODE -ne 0) { Write-Error "tests failed, aborting build" }

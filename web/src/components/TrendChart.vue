@@ -69,7 +69,7 @@ const hasData = computed(() => props.data.length > 0 && values.value.some((v) =>
           :y1="y"
           x2="100"
           :y2="y"
-          stroke="#e6e6ec"
+          stroke="var(--grid-line)"
           stroke-width="1"
           stroke-dasharray="3 5"
           vector-effect="non-scaling-stroke"
@@ -123,7 +123,7 @@ const hasData = computed(() => props.data.length > 0 && values.value.some((v) =>
   height: 9px;
   border-radius: 50%;
   transform: translate(-50%, -50%);
-  box-shadow: 0 0 0 3px #fff;
+  box-shadow: 0 0 0 3px var(--hairline);
 }
 
 .empty {

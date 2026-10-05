@@ -6,10 +6,18 @@
     <title>AI 工作流平台</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/favicon.svg" />
-    <script type="module" crossorigin src="/assets/index-Czh00Jd1.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CaxDYykI.css">
+    <script type="module" crossorigin src="/assets/index-DAnvPZjq.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DtTA2tX5.css">
   </head>
   <body>
+    <script>
+      // 防闪烁：渲染前先从 localStorage 恢复主题
+      try {
+        if (localStorage.getItem('harness.theme') === 'terminal') {
+          document.documentElement.dataset.theme = 'terminal'
+        }
+      } catch (e) {}
+    </script>
     <div id="app"></div>
   </body>
 </html>

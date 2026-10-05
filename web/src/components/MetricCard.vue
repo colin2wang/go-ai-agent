@@ -124,12 +124,12 @@ const hasSeries = computed(() => props.series.length > 1)
 }
 
 .delta.up {
-  color: #1f9d4d;
+  color: var(--ok-strong);
   background: var(--green-soft);
 }
 
 .delta.down {
-  color: #d13b30;
+  color: var(--bad-strong);
   background: var(--red-soft);
 }
 

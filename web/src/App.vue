@@ -58,7 +58,14 @@ onMounted(boot)
 </script>
 
 <template>
-  <div class="shell">
+  <div class="term-window">
+    <div class="term-titlebar">
+      <div class="term-lights"><span class="l-r" /><span class="l-y" /><span class="l-g" /></div>
+      <div class="term-title">~/{{ appInfo.name }} — harness — zsh</div>
+      <div class="term-titlebar-spacer" />
+    </div>
+
+    <div class="shell">
     <Sidebar
       :app="appInfo"
       :features="features"
@@ -104,6 +111,7 @@ onMounted(boot)
         <div v-else class="boot">子功能不存在或未启用</div>
       </template>
     </main>
+    </div>
   </div>
 </template>
 

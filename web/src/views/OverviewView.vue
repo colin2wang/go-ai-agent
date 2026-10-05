@@ -424,7 +424,7 @@ onMounted(checkAll)
   padding: 12px 15px;
   border-radius: var(--radius);
   background: var(--orange-soft);
-  color: #a86700;
+  color: var(--warn-strong);
   font-size: 13px;
   font-weight: 600;
 }
@@ -602,15 +602,15 @@ onMounted(checkAll)
 
 .state.ok {
   background: var(--green-soft);
-  color: #1f9d4d;
+  color: var(--ok-strong);
 }
 .state.warn {
   background: var(--orange-soft);
-  color: #a86700;
+  color: var(--warn-strong);
 }
 .state.off {
   background: var(--red-soft);
-  color: #d13b30;
+  color: var(--bad-strong);
 }
 .state.idle {
   background: var(--surface-2);
@@ -716,12 +716,12 @@ onMounted(checkAll)
 }
 
 .state.ok {
-  color: #1f9d4d;
+  color: var(--ok-strong);
   background: var(--green-soft);
 }
 
 .state.fail {
-  color: #d13b30;
+  color: var(--bad-strong);
   background: var(--red-soft);
 }
 

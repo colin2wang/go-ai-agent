@@ -544,7 +544,7 @@ onBeforeUnmount(() => {
   padding: 5px 11px;
   border-radius: 999px;
   background: var(--purple-soft);
-  color: #8e3fbb;
+  color: var(--purple);
   font-size: 12px;
   font-weight: 700;
 }
@@ -570,7 +570,7 @@ onBeforeUnmount(() => {
   margin: 16px 20px;
   padding: 26px 18px;
   min-height: 208px;
-  border: 1.5px dashed #d8d8e0;
+  border: 1.5px dashed var(--border);
   border-radius: var(--radius);
   background: var(--surface-2);
   cursor: pointer;
@@ -666,8 +666,8 @@ onBeforeUnmount(() => {
   height: 16px;
   padding: 0 4px;
   border-radius: 999px;
-  background: #1d1d1f;
-  color: #fff;
+  background: var(--text);
+  color: var(--bg);
   font-size: 10px;
   font-weight: 700;
   flex: none;
@@ -733,7 +733,7 @@ onBeforeUnmount(() => {
 
 .alert.error {
   background: var(--red-soft);
-  color: #c2362c;
+  color: var(--bad-strong);
 }
 
 /* ---- 结果区 ---- */
@@ -772,7 +772,7 @@ onBeforeUnmount(() => {
 
 .metric-pill.warn {
   background: var(--orange-soft);
-  color: #a86700;
+  color: var(--warn-strong);
 }
 
 .tabs {
@@ -867,14 +867,14 @@ onBeforeUnmount(() => {
 .notes-title {
   font-size: 12.5px;
   font-weight: 700;
-  color: #a86700;
+  color: var(--warn-strong);
   margin-bottom: 6px;
 }
 
 .notes ul {
   margin: 0;
   padding-left: 18px;
-  color: #8a5600;
+  color: var(--warn-deep);
   font-size: 13px;
   line-height: 1.75;
 }
@@ -992,12 +992,12 @@ onBeforeUnmount(() => {
 }
 
 .state.ok {
-  color: #1f9d4d;
+  color: var(--ok-strong);
   font-weight: 700;
 }
 
 .state.fail {
-  color: #d13b30;
+  color: var(--bad-strong);
   font-weight: 700;
 }
 

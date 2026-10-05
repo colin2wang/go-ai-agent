@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import AppIcon from './AppIcon.vue'
+import { themes, loadTheme, applyTheme, type Theme } from '../theme'
 import type { AppInfo, FeatureInfo } from '../types'
 
 defineProps<{
@@ -10,6 +12,13 @@ defineProps<{
 }>()
 
 defineEmits<{ (e: 'select', id: string): void }>()
+
+const current = ref<Theme>(loadTheme())
+
+function switchTheme(t: Theme) {
+  applyTheme(t)
+  current.value = t
+}
 </script>
 
 <template>
@@ -51,6 +60,17 @@ defineEmits<{ (e: 'select', id: string): void }>()
       <span class="dot" :class="health === null ? 'wait' : health ? 'on' : 'off'" />
       <span>{{ health === null ? '检测后端…' : health ? '后端在线' : '后端离线' }}</span>
     </div>
+
+    <div class="theme-switch segmented">
+      <button
+        v-for="t in themes"
+        :key="t.value"
+        :class="{ active: current === t.value }"
+        @click="switchTheme(t.value)"
+      >
+        {{ t.label }}
+      </button>
+    </div>
   </aside>
 </template>
 
@@ -62,7 +82,7 @@ defineEmits<{ (e: 'select', id: string): void }>()
   flex-direction: column;
   gap: 22px;
   padding: 22px 16px 18px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--surface);
   border-right: 1px solid var(--border);
   backdrop-filter: saturate(180%) blur(18px);
   position: sticky;
