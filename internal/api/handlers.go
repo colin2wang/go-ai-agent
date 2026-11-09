@@ -255,6 +255,53 @@ func (s *Server) handlePayslipReview(w http.ResponseWriter, r *http.Request) {
 	s.runFeature(w, r, id)
 }
 
+// collectFormParams 收集 multipart 表单中的非文件字段（如 target_lang）。
+// 限制字段数与值长度，避免超长文本被拼进 LLM 提示词。
+func collectFormParams(r *http.Request) map[string]string {
+	out := map[string]string{}
+	if r.MultipartForm == nil {
+		return out
+	}
+	const (
+		maxParams   = 16
+		maxValueLen = 128
+	)
+	for k, vals := range r.MultipartForm.Value {
+		if len(out) >= maxParams {
+			break
+		}
+		if len(vals) == 0 || vals[0] == "" {
+			continue
+		}
+		v := []rune(strings.TrimSpace(vals[0]))
+		if len(v) > maxValueLen {
+			v = v[:maxValueLen]
+		}
+		out[k] = string(v)
+	}
+	return out
+}
+
+// validateFormParams 按子功能声明校验额外表单参数：目标语言未提交时用
+// yml 的 default 补齐，且必须是 options 白名单内的值（启动期已校验 default 合法）。
+func validateFormParams(params map[string]string, in config.Input) error {
+	sel := in.TargetLanguage
+	if sel == nil {
+		return nil
+	}
+	lang := params[config.TargetLangField]
+	if lang == "" {
+		lang = sel.Default
+		params[config.TargetLangField] = lang
+	}
+	for _, o := range sel.Options {
+		if o == lang {
+			return nil
+		}
+	}
+	return fmt.Errorf("目标语言 %q 不在允许的选项中", lang)
+}
+
 // runFeature 上传 + 执行 + 记录任务结果的公共流程。
 // 异步模式（persist-jobs 开启或请求 async=1）：登记任务后立即返回 job_id，
 // 后台执行并把进度写入 jobs 表；同步模式保持旧行为。
@@ -279,9 +326,16 @@ func (s *Server) runFeature(w http.ResponseWriter, r *http.Request, featureID st
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 额外表单参数（目标语言等）：先补默认值再按 yml 白名单校验，
+	// 避免任意文本进入 LLM 提示词。
+	params := collectFormParams(r)
+	if err := validateFormParams(params, in); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if s.asyncRun(featureID, r) {
-		job, err := s.startAsyncJob(featureID, paths, len(paths))
+		job, err := s.startAsyncJob(featureID, paths, len(paths), params)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, "登记异步任务失败: "+err.Error())
 			return
@@ -291,7 +345,7 @@ func (s *Server) runFeature(w http.ResponseWriter, r *http.Request, featureID st
 	}
 
 	start := time.Now()
-	fs, runErr := s.runPipeline(featureID, paths)
+	fs, runErr := s.runPipeline(featureID, paths, params)
 	job := toJob(newJobID(), featureID, fs, runErr, start)
 	s.mu.Lock()
 	s.rememberJobLocked(job)

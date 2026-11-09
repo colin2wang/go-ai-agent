@@ -117,6 +117,18 @@ type Feature struct {
 // IsChat 对话类子功能（前端渲染聊天界面而非上传执行页）。
 func (f Feature) IsChat() bool { return f.Kind == "chat" }
 
+// TargetLangField 目标语言下拉框对应的 multipart 表单字段名。
+// 服务端按 Input.TargetLanguage.Options 对该字段做白名单校验后再拼进提示词。
+const TargetLangField = "target_lang"
+
+// SelectParam 输入表单上的一个下拉选择项（如字幕翻译的「目标语言」）。
+// 声明后由 GET /api/features 下发，前端渲染 <select> 并以 TargetLangField 提交。
+type SelectParam struct {
+	Label   string   `yaml:"label"`   // 下拉框标签
+	Default string   `yaml:"default"` // 未提交该字段时使用的默认值
+	Options []string `yaml:"options"` // 允许值白名单（同时作为下拉选项）
+}
+
 // Input 子功能的输入声明（前端据此渲染上传控件，服务端据此强校验）。
 type Input struct {
 	Kind       string `yaml:"kind"`         // image | file | text
@@ -126,6 +138,8 @@ type Input struct {
 	MaxFiles   int    `yaml:"max-files"`    // 单次上传文件数上限（0 = 默认 20）
 	MaxFileMB  int    `yaml:"max-file-mb"`  // 单个文件体积上限 MB（0 = 默认 16）
 	MaxTotalMB int    `yaml:"max-total-mb"` // 本次上传总体积上限 MB（0 = 默认 64）
+	// TargetLanguage 可选：需要「目标语言」参数的子功能（如字幕翻译）才声明。
+	TargetLanguage *SelectParam `yaml:"target-language"`
 }
 
 // Chat 对话类子功能的专属配置。
@@ -161,6 +175,7 @@ type Workflow struct {
 	RetryBackoffMS int      `yaml:"retry-backoff-ms"`      // 重试退避基数（毫秒，0 = 不退避）
 	MaxParallel    int      `yaml:"max-parallel"`          // 逐页并发度（0/1 = 串行）
 	ProviderMaxReq int      `yaml:"provider-max-requests"` // 每个 provider 的并发上限（0 = 默认 2）
+	BatchSize      int      `yaml:"batch-size"`            // 批量节点每次送模型的条目数（0 = 默认 20）
 	Pipeline       []string `yaml:"pipeline"`              // 展示用节点顺序
 }
 
@@ -396,6 +411,7 @@ const (
 	defaultInputMaxTotalMB  = 64
 	defaultWorkflowParallel = 1
 	defaultProviderMaxReq   = 2
+	defaultBatchSize        = 20
 	defaultCacheTTLHours    = 24
 	defaultCacheMaxRows     = 2000
 	defaultCapsTTLHours     = 24
@@ -452,6 +468,17 @@ func (w Workflow) ProviderConcurrency() int {
 		return defaultProviderMaxReq
 	}
 	return w.ProviderMaxReq
+}
+
+// BatchSizeOr 批量节点单次送模型的条目数（<=0 归一为默认值）。
+func (w Workflow) BatchSizeOr(def int) int {
+	if w.BatchSize > 0 {
+		return w.BatchSize
+	}
+	if def > 0 {
+		return def
+	}
+	return defaultBatchSize
 }
 
 // CacheEnabled 该步骤是否参与结果缓存（步骤显式声明优先于全局开关）。
@@ -546,6 +573,24 @@ func (c *Config) validate() error {
 		}
 		if f.Workflow.MaxParallel < 0 {
 			return fmt.Errorf("features.%s.workflow.max-parallel 不能为负数", f.ID)
+		}
+		if f.Workflow.BatchSize < 0 {
+			return fmt.Errorf("features.%s.workflow.batch-size 不能为负数", f.ID)
+		}
+		if sel := f.Input.TargetLanguage; sel != nil {
+			if len(sel.Options) == 0 {
+				return fmt.Errorf("features.%s.input.target-language.options 不能为空", f.ID)
+			}
+			opts := map[string]bool{}
+			for _, o := range sel.Options {
+				if strings.TrimSpace(o) == "" || opts[o] {
+					return fmt.Errorf("features.%s.input.target-language.options 含空值或重复项 %q", f.ID, o)
+				}
+				opts[o] = true
+			}
+			if !opts[sel.Default] {
+				return fmt.Errorf("features.%s.input.target-language.default %q 必须出现在 options 中", f.ID, sel.Default)
+			}
 		}
 		if f.Workflow.ProviderMaxReq < 0 {
 			return fmt.Errorf("features.%s.workflow.provider-max-requests 不能为负数", f.ID)

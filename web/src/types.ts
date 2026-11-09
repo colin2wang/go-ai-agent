@@ -7,6 +7,13 @@ export interface AppInfo {
   version: string
 }
 
+/** 目标语言下拉框声明（仅需语言参数的子功能下发，如字幕翻译）。 */
+export interface FeatureTargetLanguage {
+  label: string
+  default: string
+  options: string[]
+}
+
 /** 输入声明：前端据此渲染上传控件（单文件 / 多页），max_* 为服务端强校验上限。 */
 export interface FeatureInput {
   kind: string
@@ -19,6 +26,8 @@ export interface FeatureInput {
   max_file_mb: number
   /** 本次上传总体积上限 MB。 */
   max_total_mb: number
+  /** 可选：目标语言下拉框，选中值以 target_lang 表单字段提交。 */
+  target_language?: FeatureTargetLanguage | null
 }
 
 /** 输出声明：模板渲染与下载扩展名。 */

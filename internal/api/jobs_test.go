@@ -96,7 +96,7 @@ func TestEncodeJobResultNilState(t *testing.T) {
 
 func TestAsyncJobReachesTerminalState(t *testing.T) {
 	s := newStorageServer(t, true)
-	job, err := s.startAsyncJob("not-registered", []string{"nonexistent.png"}, 2)
+	job, err := s.startAsyncJob("not-registered", []string{"nonexistent.png"}, 2, nil)
 	if err != nil {
 		t.Fatalf("startAsyncJob: %v", err)
 	}

@@ -12,7 +12,8 @@ const emit = defineEmits<{ (e: 'done'): void }>()
 const STEP_META: Record<string, { label: string; icon: string }> = {
   ocr: { label: 'OCR 提取', icon: 'scan' },
   merge: { label: '跨页合并', icon: 'layers' },
-  render: { label: '模板渲染', icon: 'doc' },
+  parse: { label: '字幕解析', icon: 'doc' },
+  render: { label: '结果输出', icon: 'doc' },
   translate: { label: '翻译', icon: 'translate' },
   proofread: { label: '审读校验', icon: 'shield' },
   expert: { label: '专家分析', icon: 'spark' },
@@ -33,6 +34,10 @@ const accept = computed(
 )
 const hint = computed(() => props.feature.input?.hint ?? '本地模型处理通常需要 1–5 分钟')
 
+/** 后端下发的目标语言下拉框配置（未声明的子功能不显示）。 */
+const langParam = computed(() => props.feature.input?.target_language ?? null)
+const targetLang = ref(langParam.value?.default ?? '')
+
 /** 上传限制提示（取自后端下发的 input 上限，便于用户提前知情）。 */
 const limitText = computed(() => {
   const inp = props.feature.input
@@ -47,6 +52,8 @@ const limitText = computed(() => {
 interface Preview {
   name: string
   url: string
+  /** 非图片文件（如 .srt）展示文件名卡片，避免 <img> 加载失败出现破图。 */
+  isImage: boolean
 }
 
 const files = ref<File[]>([])
@@ -77,7 +84,11 @@ function reset() {
 function setFiles(list: File[]) {
   clearPreviews()
   files.value = list
-  previews.value = list.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }))
+  previews.value = list.map((f) => ({
+    name: f.name,
+    url: URL.createObjectURL(f),
+    isImage: f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name),
+  }))
   reset()
 }
 
@@ -90,16 +101,18 @@ function addFiles(list: File[]) {
   setFiles(multiple.value ? [...files.value, ...list] : list.slice(0, 1))
 }
 
-/** 按 accept 白名单判断文件类型是否受理（支持 image/* 前缀与具体 MIME）。 */
+/** 按 accept 白名单判断文件是否受理（扩展名 / image/* 前缀 / 具体 MIME）。 */
 function acceptMatches(file: File): boolean {
   const types = accept.value
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean)
   if (!types.length) return file.type.startsWith('image/')
-  return types.some((t) =>
-    t.endsWith('/*') ? file.type.startsWith(t.slice(0, -1)) : file.type === t,
-  )
+  return types.some((t) => {
+    if (t.startsWith('.')) return file.name.toLowerCase().endsWith(t.toLowerCase())
+    if (t.endsWith('/*')) return file.type.startsWith(t.slice(0, -1))
+    return file.type === t
+  })
 }
 
 /**
@@ -141,8 +154,9 @@ function onPaste(e: ClipboardEvent) {
   const renamed = imgs.map((f) => {
     n += 1
     const ext = (f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')
-    // 剪贴板图片通常无有效文件名，统一按「粘贴图片-N」命名
-    return new File([f], `粘贴图片-${n}.${ext}`, { type: f.type })
+    // 剪贴板图片通常无有效文件名；已有扩展名的文件（如 .srt）保留原名
+    const name = /\.[a-z0-9]+$/i.test(f.name) ? f.name : `粘贴图片-${n}.${ext}`
+    return new File([f], name, { type: f.type })
   })
   addFiles(renamed)
 }
@@ -178,9 +192,18 @@ async function submit() {
   try {
     // 后端启用 persist-jobs 时为异步：下方轮询回调逐次刷新 progress；
     // 未启用时首次调用即返回终态，行为与旧版一致。
-    result.value = await runFeatureAsync(props.feature.id, files.value, (job) => {
-      progress.value = job
-    })
+    // 声明了目标语言下拉框的子功能把选中值作为 target_lang 表单字段提交。
+    const extra =
+      langParam.value && targetLang.value ? { target_lang: targetLang.value } : undefined
+    result.value = await runFeatureAsync(
+      props.feature.id,
+      files.value,
+      (job) => {
+        progress.value = job
+      },
+      undefined,
+      extra,
+    )
     emit('done')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -301,7 +324,11 @@ onBeforeUnmount(() => {
           </template>
           <div v-else class="thumbs" :class="{ multi: multiple }">
             <figure v-for="(p, i) in previews" :key="p.url" class="thumb">
-              <img :src="p.url" :alt="p.name" />
+              <img v-if="p.isImage" :src="p.url" :alt="p.name" />
+              <div v-else class="thumb-file">
+                <AppIcon name="doc" :size="26" />
+                <span class="thumb-file-name">{{ p.name }}</span>
+              </div>
               <figcaption>
                 <span v-if="multiple" class="thumb-index">{{ i + 1 }}</span>
                 <span class="thumb-name">{{ p.name }}</span>
@@ -312,6 +339,13 @@ onBeforeUnmount(() => {
             </figure>
           </div>
         </label>
+
+        <div v-if="langParam" class="field-row">
+          <label class="field-label" for="target-lang">{{ langParam.label || '目标语言' }}</label>
+          <select id="target-lang" v-model="targetLang" class="field-select" :disabled="loading">
+            <option v-for="opt in langParam.options" :key="opt" :value="opt">{{ opt }}</option>
+          </select>
+        </div>
 
         <div class="actions">
           <span class="file-name">

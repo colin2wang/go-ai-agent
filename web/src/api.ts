@@ -53,8 +53,10 @@ export async function runFeatureAsync(
   files: File | File[],
   onProgress?: (job: JobResult) => void,
   pollMs: number = JOB_POLL_MS,
+  /** 额外表单字段（如字幕翻译的 target_lang）。 */
+  extra?: Record<string, string>,
 ): Promise<JobResult> {
-  const first = await runFeature(id, files)
+  const first = await runFeature(id, files, { extra })
   if (first.status === 'done' || first.status === 'failed') return first
   onProgress?.(first)
   for (;;) {
@@ -73,7 +75,7 @@ export async function runFeatureAsync(
 export async function runFeature(
   id: string,
   files: File | File[],
-  opts?: { async?: boolean; signal?: AbortSignal },
+  opts?: { async?: boolean; signal?: AbortSignal; extra?: Record<string, string> },
 ): Promise<JobResult> {
   const list = Array.isArray(files) ? files : [files]
   const form = new FormData()
@@ -81,6 +83,10 @@ export async function runFeature(
     for (const f of list) form.append('files', f)
   } else {
     form.append('file', list[0])
+  }
+  // 额外表单参数由子功能的 input 声明驱动（如目标语言），后端按白名单校验
+  if (opts?.extra) {
+    for (const [k, v] of Object.entries(opts.extra)) form.append(k, v)
   }
   const q = opts?.async === true ? '?async=1' : opts?.async === false ? '?async=0' : ''
   const res = await fetch(`/api/features/${encodeURIComponent(id)}/run${q}`, {

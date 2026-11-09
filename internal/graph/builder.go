@@ -19,6 +19,8 @@ func Build(deps nodes.Deps) (*lggraph.StateRunnable, error) {
 		return buildPayslip(deps)
 	case "book-toc":
 		return buildBookTOC(deps)
+	case "subtitle-translate":
+		return buildSubtitleTranslate(deps)
 	default:
 		return nil, fmt.Errorf("未知工作流类型 %q，请检查 features/*.yml 的 workflow.type", deps.Workflow)
 	}
@@ -51,6 +53,23 @@ func buildBookTOC(deps nodes.Deps) (*lggraph.StateRunnable, error) {
 
 	g.AddEdge("ocr", "merge")
 	g.AddEdge("merge", "render")
+	g.AddEdge("render", lggraph.END)
+
+	return g.Compile()
+}
+
+// buildSubtitleTranslate SRT 字幕 → 目标语言 SRT（线性三段，仅中间段调用 LLM）：
+//
+//	entry → parse(本地解析) → translate(分批 LLM) → render(本地重组) → END
+func buildSubtitleTranslate(deps nodes.Deps) (*lggraph.StateRunnable, error) {
+	g := lggraph.NewStateGraph()
+	g.AddNode("parse", wrap(nodes.SubtitleParse(deps)))
+	g.AddNode("translate", wrap(nodes.SubtitleTranslate(deps)))
+	g.AddNode("render", wrap(nodes.SubtitleRender(deps)))
+	g.SetEntryPoint("parse")
+
+	g.AddEdge("parse", "translate")
+	g.AddEdge("translate", "render")
 	g.AddEdge("render", lggraph.END)
 
 	return g.Compile()

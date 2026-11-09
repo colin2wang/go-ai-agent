@@ -7,3 +7,5 @@ dist/
 internal/api/webdist/*
 !internal/api/webdist/index.html
 docs/SUMMARY.md
+
+COMMIT.md

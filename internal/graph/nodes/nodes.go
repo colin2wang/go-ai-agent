@@ -43,9 +43,13 @@ type State struct {
 	Translation  string         // 翻译结果
 	ReviewNotes  []string       // 审读发现的问题 / 降级提示
 	ExpertReport string         // 专家分析
-	FinalReport  string         // 最终输出（汇总报告 / 模板渲染后的目录）
-	Err          error          // 最近一次节点错误（供条件边重试判断）
-	RetryCount   map[string]int // 各节点已重试次数
+	FinalReport  string         // 最终输出（汇总报告 / 模板渲染后的目录 / 完整译文 SRT）
+	// 字幕翻译场景：parse 解析出的块、原始文本与本次目标语言。
+	SRTBlocks  []SRTBlock
+	SRTSource  string
+	TargetLang string
+	Err        error          // 最近一次节点错误（供条件边重试判断）
+	RetryCount map[string]int // 各节点已重试次数
 }
 
 // Deps 节点共享依赖（由某条子功能的工作流配置构造）。
@@ -64,6 +68,10 @@ type Deps struct {
 	Workflow string
 	// Parallel 逐页并发度（>=2 时多页 OCR 并发执行，结果仍按页序汇总）。
 	Parallel int
+	// BatchSize 批量节点（字幕翻译）单次送模型的字幕条数（<=0 由节点回退默认值）。
+	BatchSize int
+	// Params 本次执行的额外表单参数（如 target_lang）；每次执行单独构造，避免并发任务串扰。
+	Params map[string]string
 	// CacheEnabled 本次工作流的步骤是否默认参与 LLM 结果缓存。
 	CacheEnabled bool
 	// NoCacheSteps 显式声明 cache: false 的步骤名集合（在 CacheEnabled=true 时排除这些步骤）。

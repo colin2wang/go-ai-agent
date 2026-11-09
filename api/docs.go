@@ -617,6 +617,9 @@ const docTemplate = `{
                 },
                 "multiple": {
                     "type": "boolean"
+                },
+                "target_language": {
+                    "$ref": "#/definitions/api.FeatureTargetLanguage"
                 }
             }
         },
@@ -631,6 +634,23 @@ const docTemplate = `{
                 },
                 "template_dir": {
                     "type": "string"
+                }
+            }
+        },
+        "api.FeatureTargetLanguage": {
+            "type": "object",
+            "properties": {
+                "default": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },

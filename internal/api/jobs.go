@@ -46,7 +46,7 @@ func encodeJobResult(fs *nodes.State) []byte {
 
 // startAsyncJob 登记任务并后台执行，返回初始任务快照（status=processing）。
 // 存储写入失败时降级为内存登记（GET 仍可查到本轮结果）。
-func (s *Server) startAsyncJob(featureID string, paths []string, total int) (*JobResult, error) {
+func (s *Server) startAsyncJob(featureID string, paths []string, total int, params map[string]string) (*JobResult, error) {
 	store := s.jobsStore()
 	id := newJobID()
 	now := time.Now().Format(time.RFC3339)
@@ -66,12 +66,12 @@ func (s *Server) startAsyncJob(featureID string, paths []string, total int) (*Jo
 		s.mu.Unlock()
 	}
 	s.numWorking.Add(1)
-	go s.runAsyncJob(id, featureID, paths, total)
+	go s.runAsyncJob(id, featureID, paths, total, params)
 	return job, nil
 }
 
 // runAsyncJob 后台执行流水线：进度写 jobs 表，终态写结果/错误编码。
-func (s *Server) runAsyncJob(id, featureID string, paths []string, total int) {
+func (s *Server) runAsyncJob(id, featureID string, paths []string, total int, params map[string]string) {
 	defer s.numWorking.Add(-1)
 	store := s.jobsStore()
 	start := time.Now()
@@ -110,7 +110,7 @@ func (s *Server) runAsyncJob(id, featureID string, paths []string, total int) {
 		}
 		mark("running", done, detail, nil, "")
 		snapshot("running", done, detail)
-	})
+	}, params)
 	mark("running", 0, "开始执行", nil, "")
 	snapshot("running", 0, "开始执行")
 
@@ -148,15 +148,16 @@ func (s *Server) rememberJobLocked(job *JobResult) {
 }
 
 // buildDepsForProgress 为一次异步执行构造带进度回调的依赖（total 动态回填写入行）。
-func (s *Server) buildDepsForProgress(featureID string, progress func(step string, done, total int, detail string)) nodes.Deps {
+func (s *Server) buildDepsForProgress(featureID string, progress func(step string, done, total int, detail string), params map[string]string) nodes.Deps {
 	f, ok := s.cfg.Feature(featureID)
 	if !ok {
 		if d, has := s.pipelines[featureID]; has {
 			d.Progress = progress
+			d.Params = params
 			return d
 		}
 	}
-	return s.buildDeps(f, progress)
+	return s.buildDeps(f, progress, params)
 }
 
 // jobView 从存储行还原任务快照（result 仅在 done 时解码）。

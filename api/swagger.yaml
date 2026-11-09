@@ -63,6 +63,8 @@ definitions:
         type: integer
       multiple:
         type: boolean
+      target_language:
+        $ref: '#/definitions/api.FeatureTargetLanguage'
     type: object
   api.FeatureOutput:
     properties:
@@ -72,6 +74,17 @@ definitions:
         type: string
       template_dir:
         type: string
+    type: object
+  api.FeatureTargetLanguage:
+    properties:
+      default:
+        type: string
+      label:
+        type: string
+      options:
+        items:
+          type: string
+        type: array
     type: object
   api.JobResult:
     properties:

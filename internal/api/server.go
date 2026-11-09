@@ -90,15 +90,23 @@ type FeatureInfo struct {
 	Async       bool          `json:"async"` // true = 上传后立即返回 job_id，前端轮询获取进度与结果
 }
 
+// FeatureTargetLanguage 目标语言下拉框描述（仅声明了 input.target-language 的子功能下发）。
+type FeatureTargetLanguage struct {
+	Label   string   `json:"label"`
+	Default string   `json:"default"`
+	Options []string `json:"options"`
+}
+
 // FeatureInput 输入声明（前端据此渲染上传控件，max_* 为服务端强校验上限）。
 type FeatureInput struct {
-	Kind       string `json:"kind"`
-	Multiple   bool   `json:"multiple"`
-	Accept     string `json:"accept"`
-	Hint       string `json:"hint"`
-	MaxFiles   int    `json:"max_files"`
-	MaxFileMB  int    `json:"max_file_mb"`
-	MaxTotalMB int    `json:"max_total_mb"`
+	Kind           string                 `json:"kind"`
+	Multiple       bool                   `json:"multiple"`
+	Accept         string                 `json:"accept"`
+	Hint           string                 `json:"hint"`
+	MaxFiles       int                    `json:"max_files"`
+	MaxFileMB      int                    `json:"max_file_mb"`
+	MaxTotalMB     int                    `json:"max_total_mb"`
+	TargetLanguage *FeatureTargetLanguage `json:"target_language,omitempty"`
 }
 
 // FeatureOutput 输出声明（模板名 / 外部模板目录 / 下载扩展名）。
@@ -177,7 +185,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	maxConc := 0
 	for _, f := range cfg.Resolved {
-		s.pipelines[f.ID] = s.buildDeps(f, nil)
+		s.pipelines[f.ID] = s.buildDeps(f, nil, nil)
 		if c := f.Workflow.ProviderConcurrency(); c > maxConc {
 			maxConc = c
 		}
@@ -199,9 +207,10 @@ func New(cfg *config.Config) (*Server, error) {
 	return s, nil
 }
 
-// buildDeps 为某子功能构造工作流依赖；progress 非 nil 时用于异步任务进度上报
-// （每次执行单独构造一份 Deps，避免并发任务间串扰）。
-func (s *Server) buildDeps(f config.Feature, progress func(step string, done, total int, detail string)) nodes.Deps {
+// buildDeps 为某子功能构造工作流依赖；progress 非 nil 时用于异步任务进度上报，
+// params 为本次请求的额外表单参数（如 target_lang）。每次执行单独构造一份 Deps，
+// 避免并发任务间串扰。
+func (s *Server) buildDeps(f config.Feature, progress func(step string, done, total int, detail string), params map[string]string) nodes.Deps {
 	globalCache := s.cfg.Cache.Enabled
 	noCache := map[string]bool{}
 	for name, st := range f.Steps {
@@ -223,6 +232,8 @@ func (s *Server) buildDeps(f config.Feature, progress func(step string, done, to
 		RetryMax:       f.Workflow.CallRetryMax(),
 		RetryBackoffMS: f.Workflow.RetryBackoffMS,
 		Parallel:       f.Workflow.Parallel(),
+		BatchSize:      f.Workflow.BatchSizeOr(0),
+		Params:         params,
 		CacheEnabled:   globalCache,
 		NoCacheSteps:   noCache,
 		Workflow:       f.Workflow.Type,
@@ -234,15 +245,16 @@ func (s *Server) buildDeps(f config.Feature, progress func(step string, done, to
 }
 
 // depsFor 返回子功能默认的同步执行依赖（无进度回调）。
-func (s *Server) depsFor(featureID string) (nodes.Deps, bool) {
+func (s *Server) depsFor(featureID string, params map[string]string) (nodes.Deps, bool) {
 	f, ok := s.cfg.Feature(featureID)
 	if !ok {
 		if d, ok := s.pipelines[featureID]; ok { // 兼容仅有 pipeline 的场景
+			d.Params = params
 			return d, true
 		}
 		return nodes.Deps{}, false
 	}
-	return s.buildDeps(f, nil), true
+	return s.buildDeps(f, nil, params), true
 }
 
 // asyncRun 判断某子功能的 run 是否走异步任务模式（配置默认 + 请求级 async=1/0 覆盖）。
@@ -478,8 +490,8 @@ func (s *Server) runPipelineWith(deps nodes.Deps, featureID string, paths []stri
 }
 
 // runPipeline 组装图并同步执行（按子功能取步骤配置、选择工作流）。
-func (s *Server) runPipeline(featureID string, paths []string) (*nodes.State, error) {
-	deps, ok := s.depsFor(featureID)
+func (s *Server) runPipeline(featureID string, paths []string, params map[string]string) (*nodes.State, error) {
+	deps, ok := s.depsFor(featureID, params)
 	if !ok {
 		return nil, fmt.Errorf("子功能 %q 未启用或不存在", featureID)
 	}
@@ -494,6 +506,14 @@ func (s *Server) featureInfos() []FeatureInfo {
 		for name := range f.Steps {
 			steps = append(steps, name)
 		}
+		var langSel *FeatureTargetLanguage
+		if sel := f.Input.TargetLanguage; sel != nil {
+			langSel = &FeatureTargetLanguage{
+				Label:   orDefault(sel.Label, "目标语言"),
+				Default: sel.Default,
+				Options: append([]string(nil), sel.Options...),
+			}
+		}
 		out = append(out, FeatureInfo{
 			ID:          f.ID,
 			Name:        f.Name,
@@ -504,13 +524,14 @@ func (s *Server) featureInfos() []FeatureInfo {
 			Pipeline:    f.Workflow.Pipeline,
 			Steps:       steps,
 			Input: FeatureInput{
-				Kind:       orDefault(f.Input.Kind, "image"),
-				Multiple:   f.Input.Multiple,
-				Accept:     orDefault(f.Input.Accept, "image/png,image/jpeg,image/webp"),
-				Hint:       f.Input.Hint,
-				MaxFiles:   f.Input.FileCountLimit(),
-				MaxFileMB:  int(f.Input.FileBytesLimit() >> 20),
-				MaxTotalMB: int(f.Input.TotalBytesLimit() >> 20),
+				Kind:           orDefault(f.Input.Kind, "image"),
+				Multiple:       f.Input.Multiple,
+				Accept:         orDefault(f.Input.Accept, "image/png,image/jpeg,image/webp"),
+				Hint:           f.Input.Hint,
+				MaxFiles:       f.Input.FileCountLimit(),
+				MaxFileMB:      int(f.Input.FileBytesLimit() >> 20),
+				MaxTotalMB:     int(f.Input.TotalBytesLimit() >> 20),
+				TargetLanguage: langSel,
 			},
 			Output: FeatureOutput{
 				Template:    orDefault(f.Output.Template, "markdown"),

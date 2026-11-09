@@ -71,3 +71,7 @@ features:
   - id: book-toc
     enabled: true
     config: features/book-toc.yml
+
+  - id: subtitle-translate
+    enabled: true
+    config: features/subtitle-translate.yml
