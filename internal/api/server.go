@@ -1,17 +1,12 @@
-// Package api 提供 REST API：
-//   - /api/features    子功能清单（前端左侧菜单）
-//   - /api/overview    概览指标（调用统计聚合）
-//   - /api/features/{id}/run  执行某子功能工作流（上传文件）
-//
-// Swagger 注解经 swaggo 生成 OpenAPI 文档（/swagger/index.html）。
+// Package api 提供应用核心逻辑（子功能工作流、对话转发、统计与任务），
+// 由 Wails 桌面端绑定层（app.go）直接调用，不再经过 HTTP 服务。
 package api
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,13 +17,13 @@ import (
 	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/graph"
 	"go-ai-agent/internal/graph/nodes"
+	"go-ai-agent/internal/iolog"
 	"go-ai-agent/internal/llm"
 	"go-ai-agent/internal/stats"
 	"go-ai-agent/internal/tmpl"
-	"go-ai-agent/pkg/iolog"
 )
 
-// Server HTTP 服务，内部持有已初始化的流水线依赖。
+// Server 应用核心：持有已初始化的流水线依赖（原 HTTP 服务层已移除，由桌面端绑定层调用）。
 type Server struct {
 	cfg      *config.Config
 	factory  *llm.Factory
@@ -41,9 +36,6 @@ type Server struct {
 
 	capsCache *modelCapsCache // 模型能力探测缓存（provider|model → 结果，启动时从 SQLite 预热）
 	probeLock sync.Mutex      // 串行化能力探测：同 key 并发请求只探测一次
-
-	routeOnce sync.Once // 首次请求时构建路由树（含鉴权包装）
-	router    http.Handler
 
 	// Version 由 main 注入（ldflags 编译期版本）。
 	Version string
@@ -257,12 +249,12 @@ func (s *Server) depsFor(featureID string, params map[string]string) (nodes.Deps
 	return s.buildDeps(f, nil, params), true
 }
 
-// asyncRun 判断某子功能的 run 是否走异步任务模式（配置默认 + 请求级 async=1/0 覆盖）。
-func (s *Server) asyncRun(featureID string, r *http.Request) bool {
-	switch r.URL.Query().Get("async") {
-	case "1", "true":
-		return s.recorder.Jobs() != nil
-	case "0", "false":
+// asyncRun 判断某子功能的 run 是否走异步任务模式（配置默认 + 调用方 async 覆盖）。
+func (s *Server) asyncRun(featureID string, asyncOverride *bool) bool {
+	if asyncOverride != nil {
+		if *asyncOverride {
+			return s.recorder.Jobs() != nil
+		}
 		return false
 	}
 	return s.cfg.Storage.PersistJobs && s.recorder.Jobs() != nil
@@ -362,72 +354,61 @@ drained:
 	_ = os.RemoveAll(s.tmpDir)
 }
 
-// respond 统一 JSON 输出。
-func respond(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+// uploadSource / saveUploads 见下方定义。
+
+// uploadSource 一次上传文件的来源抽象：HTTP multipart 与桌面端字节输入共用。
+type uploadSource struct {
+	name string // 原始文件名（决定落盘扩展名）
+	size int64  // 字节数（用于体积上限校验）
+	open func() (io.ReadCloser, error)
 }
 
-// apiError 统一错误响应体。
-type apiError struct {
-	Error string `json:"error" example:"error message"`
-}
-
-func fail(w http.ResponseWriter, code int, msg string) {
-	respond(w, code, apiError{Error: msg})
+// sourceFromBytes 从内存字节构造上传源（桌面端 / 测试用）。
+func sourceFromBytes(name string, data []byte) uploadSource {
+	return uploadSource{
+		name: name,
+		size: int64(len(data)),
+		open: func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(data)), nil
+		},
+	}
 }
 
 // saveUploads 保存上传文件到临时目录，返回落盘路径列表（按上传顺序）。
-// 多页场景用 files 字段（可多个），单文件场景用 file 字段，两者兼容。
 // in 携带服务端强校验上限（文件数/单文件体积/总体积）。
-func (s *Server) saveUploads(r *http.Request, in config.Input) ([]string, error) {
-	if r.MultipartForm == nil {
+func (s *Server) saveUploads(in config.Input, srcs []uploadSource) ([]string, error) {
+	if len(srcs) == 0 {
 		return nil, fmt.Errorf("缺少上传文件")
 	}
-	if headers := r.MultipartForm.File["files"]; len(headers) > 0 {
-		if err := checkUploadLimits(in, headers); err != nil {
+	if err := checkUploadLimits(in, srcs); err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(srcs))
+	for _, src := range srcs {
+		p, err := s.saveSource(src)
+		if err != nil {
 			return nil, err
 		}
-		paths := make([]string, 0, len(headers))
-		for _, h := range headers {
-			p, err := s.saveFileHeader(h)
-			if err != nil {
-				return nil, err
-			}
-			paths = append(paths, p)
-		}
-		return paths, nil
+		paths = append(paths, p)
 	}
-	_, h, err := r.FormFile("file")
-	if err != nil {
-		return nil, fmt.Errorf("缺少 file / files 字段: %w", err)
-	}
-	if err := checkUploadLimits(in, []*multipart.FileHeader{h}); err != nil {
-		return nil, err
-	}
-	p, err := s.saveFileHeader(h)
-	if err != nil {
-		return nil, err
-	}
-	return []string{p}, nil
+	return paths, nil
 }
 
 // checkUploadLimits 按子功能 input 声明校验文件数与体积（声明了 multiple 才能多文件）。
-func checkUploadLimits(in config.Input, headers []*multipart.FileHeader) error {
-	if len(headers) > 1 && !in.Multiple {
-		return fmt.Errorf("该子功能不支持多文件上传（收到 %d 个文件）", len(headers))
+func checkUploadLimits(in config.Input, srcs []uploadSource) error {
+	if len(srcs) > 1 && !in.Multiple {
+		return fmt.Errorf("该子功能不支持多文件上传（收到 %d 个文件）", len(srcs))
 	}
-	if max := in.FileCountLimit(); len(headers) > max {
-		return fmt.Errorf("文件数 %d 超过上限 %d", len(headers), max)
+	if max := in.FileCountLimit(); len(srcs) > max {
+		return fmt.Errorf("文件数 %d 超过上限 %d", len(srcs), max)
 	}
 	var total int64
-	for i, h := range headers {
-		if limit := in.FileBytesLimit(); h.Size > limit {
+	for i, src := range srcs {
+		if limit := in.FileBytesLimit(); src.size > limit {
 			return fmt.Errorf("第 %d 个文件 %.1fMB 超过单文件上限 %.0fMB",
-				i+1, float64(h.Size)/(1<<20), float64(limit)/(1<<20))
+				i+1, float64(src.size)/(1<<20), float64(limit)/(1<<20))
 		}
-		total += h.Size
+		total += src.size
 	}
 	if limit := in.TotalBytesLimit(); total > limit {
 		return fmt.Errorf("上传总体积 %.1fMB 超过上限 %.0fMB",
@@ -436,14 +417,14 @@ func checkUploadLimits(in config.Input, headers []*multipart.FileHeader) error {
 	return nil
 }
 
-// saveFileHeader 将单个上传文件落盘，返回路径。
-func (s *Server) saveFileHeader(header *multipart.FileHeader) (string, error) {
-	file, err := header.Open()
+// saveSource 将单个上传文件落盘，返回路径。
+func (s *Server) saveSource(src uploadSource) (string, error) {
+	file, err := src.open()
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
-	ext := filepath.Ext(header.Filename)
+	ext := filepath.Ext(src.name)
 	if ext == "" {
 		ext = ".png"
 	}

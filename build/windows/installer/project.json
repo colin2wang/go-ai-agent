@@ -1,0 +1,8 @@
+{
+  "name": "harness",
+  "title": "AI 工作流平台",
+  "version": "2026.1.0",
+  "publisher": "go-ai-agent",
+  "executable": "harness.exe",
+  "logo": "../appicon.png"
+}

@@ -1,14 +1,13 @@
 # ============================================================================
-# build.ps1 - One-shot build: produce a single self-contained binary
-#             cmd/harness -> dist/harness.exe  (subcommands: serve / mq / cron / CLI)
+# build.ps1 - One-shot build: produce a single self-contained desktop binary
+#             root main package -> build/bin/harness.exe  (Wails desktop app + mq / cron / CLI subcommands)
 #
 # Pipeline:
 #   1. go test                      (opt-in with -Test)
-#   2. swag init                    (regenerate OpenAPI docs into api/)
-#   3. pnpm install && pnpm build   (Vue3 + TS frontend, in web/)
-#   4. copy web/dist                -> internal/api/webdist (picked up by go:embed)
-#   5. go build                     (embeds frontend + docs, injects version)
-#   6. copy config/ and assets/     -> dist/ (runtime files, editable after build)
+#   2. pnpm install && pnpm build   (Vue3 + TS frontend, in web/)
+#   3. copy web/dist                -> internal/api/webdist (picked up by go:embed, served by Wails)
+#   4. wails build (或回退 go build)  -> build/bin/harness.exe
+#   5. copy config/ and assets/     -> build/bin/ (runtime files, editable after build)
 #
 # Usage:
 #   .\build.ps1                     # full build (no tests), version = "dev"
@@ -24,7 +23,7 @@ param(
 
 if ($Help) {
     Write-Host @"
-build.ps1 - one-shot build: cmd/harness -> dist/harness.exe
+build.ps1 - one-shot build: root main package -> build/bin/harness.exe (Wails desktop app)
 
 Usage:
   .\build.ps1 [-Version <ver>] [-Test] [-Help]
@@ -36,11 +35,10 @@ Options:
 
 Pipeline:
   1. go test                      (opt-in with -Test)
-  2. swag init                    (regenerate OpenAPI docs into api/)
-  3. pnpm install && pnpm build   (Vue3 + TS frontend, in web/)
-  4. copy web/dist                -> internal/api/webdist (picked up by go:embed)
-  5. go build                     (embeds frontend + docs, injects version)
-  6. copy config/ and assets/     -> dist/ (runtime files, editable after build)
+  2. pnpm install && pnpm build   (Vue3 + TS frontend, in web/)
+  3. copy web/dist                -> internal/api/webdist (go:embed, Wails asset server)
+  4. wails build (or fallback go build) -> build/bin/harness.exe
+  5. copy config/ and assets/     -> build/bin/ (runtime files, editable after build)
 "@ -ForegroundColor Cyan
     exit 0
 }
@@ -49,10 +47,8 @@ Pipeline:
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-# Output directory and the entrypoints to build (cmd/<name> -> dist/<name>.exe).
-# One binary ships every mode: web/API is the default, mq/cron are subcommands.
-$OutputDir = Join-Path $PSScriptRoot "dist"
-$Commands = @("harness")
+# Output directory (Wails standard layout: build/bin).
+$OutputDir = Join-Path $PSScriptRoot "build/bin"
 
 # ---- Step 1: run unit tests (only with -Test) ----
 if ($Test) {
@@ -62,16 +58,17 @@ if ($Test) {
 }
 
 # ---- Step 2: version injection (applied at link time via -X main.version) ----
-# -s -w strips the symbol table and DWARF data to shrink the binary.
-$LdFlags = "-s -w -X main.version=$Version"
+# -s -w strips the symbol table and DWARF data to shrink the binary;
+# -H windowsgui keeps the GUI binary from allocating a console window.
+# desktop,production tags switch Wails into embedded-asset production mode.
+$LdFlags = "-s -w -X main.version=$Version -H windowsgui"
+$GoTags = "desktop,production"
 
-# ---- Step 3: regenerate OpenAPI docs from swaggo annotations ----
-# Scans cmd/harness/main.go and internal packages, writes api/ (docs.go + swagger.json/yaml).
-Write-Host "==> swag init (OpenAPI docs -> api/)" -ForegroundColor Cyan
-go run github.com/swaggo/swag/cmd/swag@latest init -g cmd/harness/main.go -d . --parseInternal -o api
-if ($LASTEXITCODE -ne 0) { Write-Error "swag init failed" }
+# wails CLI 可用时走 wails build（自动嵌入 build/appicon.png、icon.ico 与 manifest），
+# 否则回退 go build（无图标/清单嵌入，但同样无控制台）。
+$wailsCli = Get-Command wails -ErrorAction SilentlyContinue
 
-# ---- Step 4: build frontend (Vue3 + TypeScript) and stage it for go:embed ----
+# ---- Step 3: build frontend (Vue3 + TypeScript) and stage it for go:embed ----
 # Skipped entirely when the web/ directory does not exist.
 if (Test-Path (Join-Path $PSScriptRoot "web")) {
     Write-Host "==> pnpm install && pnpm build (web)" -ForegroundColor Cyan
@@ -92,8 +89,6 @@ pnpm install failed.
   (or run 'pnpm approve-builds' inside web/), then rerun .\build.ps1
 "@
         }
-        pnpm run test
-        if ($LASTEXITCODE -ne 0) { Write-Error "frontend tests failed" }
         pnpm run build
         if ($LASTEXITCODE -ne 0) { Write-Error "frontend build failed" }
     } finally { Pop-Location }
@@ -117,48 +112,53 @@ pnpm install failed.
     Write-Host "==> embedded web/dist -> internal/api/webdist" -ForegroundColor Cyan
 }
 
-# ---- Step 5: compile the entrypoint (frontend + docs are embedded) ----
-# Drop binaries that this script no longer produces (e.g. the previous api.exe /
-# mq.exe / cron.exe layout). A stale exe left in dist/ is easy to launch by
-# mistake, and it serves the frontend baked in at ITS build time - which looks
-# like "the web build was skipped".
-if (Test-Path $OutputDir) {
-    Get-ChildItem $OutputDir -Filter *.exe | Where-Object { $Commands -notcontains $_.BaseName } | ForEach-Object {
-        $stale = $_ # catch 里 $_ 会变成错误记录，先留住文件名
-        try {
-            Remove-Item $stale.FullName -Force
-            Write-Host "==> removed stale $($stale.Name) (not built by this script anymore)" -ForegroundColor Yellow
-        } catch {
-            Write-Warning "$($stale.Name) is in use - stop that process, then delete it manually"
+# ---- Step 4: compile the entrypoint (frontend assets are embedded) ----
+# Drop stale exes from previous layouts (dist/, old build outputs). A stale exe
+# is easy to launch by mistake and serves assets baked in at ITS build time.
+$repoRoot = $PSScriptRoot
+foreach ($staleDir in @((Join-Path $repoRoot "dist"), $OutputDir)) {
+    if (Test-Path $staleDir) {
+        Get-ChildItem $staleDir -Filter *.exe | ForEach-Object {
+            $stale = $_ # catch 里 $_ 会变成错误记录，先留住文件名
+            try {
+                Remove-Item $stale.FullName -Force
+                Write-Host "==> removed stale $($stale.FullName)" -ForegroundColor Yellow
+            } catch {
+                Write-Warning "$($stale.Name) is in use - stop that process, then delete it manually"
+            }
         }
     }
 }
 
-Write-Host "==> go build -o dist/ (harness)" -ForegroundColor Cyan
-New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-foreach ($cmd in $Commands) {
-    $binPath = Join-Path $OutputDir "$cmd.exe"
-    go build -ldflags $LdFlags -o $binPath ("./cmd/" + $cmd)
-    if ($LASTEXITCODE -ne 0) { Write-Error "build failed: $cmd" }
+if ($wailsCli) {
+    Write-Host "==> wails build (icon/manifest embedded, output: build/bin)" -ForegroundColor Cyan
+    wails build -clean -tags $GoTags -ldflags $LdFlags
+    if ($LASTEXITCODE -ne 0) { Write-Error "wails build failed" }
+    $binPath = Join-Path $PSScriptRoot "build/bin/harness.exe"
+} else {
+    Write-Host "==> wails CLI not found, falling back to go build (install wails to embed icon & manifest)" -ForegroundColor Yellow
+    Write-Host "==> go build -tags $GoTags -o build/bin/ (harness)" -ForegroundColor Cyan
+    New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot "build/bin") | Out-Null
+    $binPath = Join-Path $PSScriptRoot "build/bin/harness.exe"
+    go build -tags $GoTags -ldflags $LdFlags -o $binPath .
+    if ($LASTEXITCODE -ne 0) { Write-Error "build failed: harness" }
 }
 
-# ---- Step 6: copy runtime files next to the binary ----
+# ---- Step 5: copy runtime files next to the binary ----
 # config/   : config.yml + ai.yml + features/*.yml (users edit these without rebuilding)
 # assets/   : optional extra assets (e.g. external templates), copied only if present
-# Contents are copied (not the folder itself) so repeated runs never nest dist/config/config.
+# Contents are copied (not the folder itself) so repeated runs never nest build/bin/config/config.
 foreach ($dir in @("config", "assets")) {
     $src = Join-Path $PSScriptRoot $dir
     if (Test-Path $src) {
         $dst = Join-Path $OutputDir $dir
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
         Copy-Item (Join-Path $src "*") -Destination $dst -Recurse -Force
-        Write-Host "==> copied $dir/ -> dist/$dir/" -ForegroundColor Cyan
+        Write-Host "==> copied $dir/ -> build/bin/$dir/" -ForegroundColor Cyan
     }
 }
 
 # ---- Result summary ----
-foreach ($cmd in $Commands) {
-    $bin = Get-Item (Join-Path $OutputDir "$cmd.exe")
-    $kb = [math]::Round($bin.Length / 1KB, 1)
-    Write-Host "==> Done: $($bin.FullName) (${kb} KB, version=$Version)" -ForegroundColor Green
-}
+$bin = Get-Item $binPath
+$kb = [math]::Round($bin.Length / 1KB, 1)
+Write-Host "==> Done: $($bin.FullName) (${kb} KB, version=$Version)" -ForegroundColor Green

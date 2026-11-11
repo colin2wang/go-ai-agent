@@ -1,0 +1,14 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "harness",
+  "outputfilename": "harness",
+  "frontend:install": "pnpm install",
+  "frontend:build": "pnpm build",
+  "frontend:dev:watcher": "pnpm dev",
+  "frontend:dev:serverUrl": "http://localhost:5173",
+  "frontend:dir": "web",
+  "info": {
+    "productName": "harness",
+    "comments": "LLM 工作流桌面应用（Wails 封装，内嵌 Vue3 前端）"
+  }
+}

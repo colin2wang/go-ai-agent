@@ -1,16 +1,12 @@
-// jobs.go 异步任务 API：POST run?async=1 立即返回 job_id，后台执行并持续把
-// 进度写入 SQLite jobs 表；前端通过 GET /api/jobs/{id} 轮询或 GET /api/jobs/{id}/events
-// 订阅 SSE 获取“第 n/m 页”进度与最终结果。未启用 persist-jobs 时全部回退旧的
-// 同步 + 内存态行为，保证单机零配置体验不变。
+// jobs.go 异步任务：登记任务后立即返回 job_id，后台执行并持续把进度写入
+// SQLite jobs 表；调用方（桌面端绑定层）轮询 lookupJob 获取“第 n/m 页”进度
+// 与最终结果。未启用 persist-jobs 时全部回退旧的同步 + 内存态行为。
 package api
 
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
-	"strconv"
 	"time"
 
 	"go-ai-agent/internal/graph/nodes"
@@ -45,7 +41,7 @@ func encodeJobResult(fs *nodes.State) []byte {
 }
 
 // startAsyncJob 登记任务并后台执行，返回初始任务快照（status=processing）。
-// 存储写入失败时降级为内存登记（GET 仍可查到本轮结果）。
+// 存储写入失败时降级为内存登记（查询仍可查到本轮结果）。
 func (s *Server) startAsyncJob(featureID string, paths []string, total int, params map[string]string) (*JobResult, error) {
 	store := s.jobsStore()
 	id := newJobID()
@@ -60,7 +56,7 @@ func (s *Server) startAsyncJob(featureID string, paths []string, total int, para
 			return nil, err
 		}
 	} else {
-		// 未落库时先同步登记内存，避免响应返回后立刻轮询拿到 404
+		// 未落库时先同步登记内存，避免响应返回后立刻轮询查不到
 		s.mu.Lock()
 		s.rememberJobLocked(job)
 		s.mu.Unlock()
@@ -85,7 +81,7 @@ func (s *Server) runAsyncJob(id, featureID string, paths []string, total int, pa
 			slog.Warn("更新任务状态失败", slog.String("job", id), slog.String("error", err.Error()))
 		}
 	}
-	// 未开持久化时靠内存 map 供 GET 查询（开持久化时不写内存，避免大结果长期驻留）
+	// 未开持久化时靠内存 map 供查询（开持久化时不写内存，避免大结果长期驻留）
 	keepMem := store == nil
 	snapshot := func(status string, progress int, detail string) {
 		if !keepMem {
@@ -205,121 +201,4 @@ func (s *Server) lookupJob(id string) (*JobResult, bool) {
 	job, ok := s.jobs[id]
 	s.mu.Unlock()
 	return job, ok
-}
-
-// handleJobList godoc
-// @Summary      任务列表
-// @Description  返回异步任务（不含结果正文），支持过滤与分页：
-// @Description  query: feature（子功能 id）、status（pending/running/done/failed）、n（每页条数，默认 50，上限 200）、offset（偏移量）
-// @Tags         jobs
-// @Produce      json
-// @Param        feature  query  string  false  "按子功能 id 过滤"
-// @Param        status   query  string  false  "按状态过滤"
-// @Param        n        query  int     false  "每页条数（默认 50，上限 200）"
-// @Param        offset   query  int     false  "分页偏移量"
-// @Success      200  {object}  map[string]any  "jobs: JobResult 数组；total: 过滤条件下的总条数"
-// @Router       /api/jobs [get]
-func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) {
-	store := s.jobsStore()
-	if store == nil {
-		respond(w, http.StatusOK, map[string]any{"jobs": []JobResult{}, "persistent": false})
-		return
-	}
-	q := r.URL.Query()
-	n := 50
-	if v := q.Get("n"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-			n = parsed
-		}
-	}
-	offset := 0
-	if v := q.Get("offset"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-			offset = parsed
-		}
-	}
-	rows, err := store.Query(stats.JobFilter{
-		Feature: q.Get("feature"),
-		Status:  q.Get("status"),
-		Limit:   n,
-		Offset:  offset,
-	})
-	if err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	out := make([]JobResult, 0, len(rows))
-	for _, row := range rows {
-		view := jobView(row)
-		out = append(out, *view)
-	}
-	respond(w, http.StatusOK, map[string]any{
-		"jobs":       out,
-		"persistent": true,
-		"limit":      n,
-		"offset":     offset,
-	})
-}
-
-// handleJobEvents godoc
-// @Summary      任务进度流（SSE）
-// @Description  以 SSE 推送任务进度与终态：event: progress / done / failed，data 为 JobResult；任务已结束时收到终态后立即关闭
-// @Tags         jobs
-// @Produce      text/event-stream
-// @Param        id  path  string  true  "任务 ID"
-// @Success      200  {string}  string  "SSE 事件流"
-// @Failure      404  {object}  apiError
-// @Router       /api/jobs/{id}/events [get]
-func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		fail(w, http.StatusInternalServerError, "当前环境不支持 SSE")
-		return
-	}
-	// 首次查询失败直接 404（后续查询错误只结束流）
-	first, found := s.lookupJob(id)
-	if !found {
-		fail(w, http.StatusNotFound, "job not found: "+id)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	send := func(event string, job *JobResult) {
-		b, err := json.Marshal(job)
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-		flusher.Flush()
-	}
-
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	prev := *first
-	for {
-		event := "progress"
-		switch prev.Status {
-		case "done":
-			event = "done"
-		case "failed":
-			event = "failed"
-		}
-		send(event, &prev)
-		if prev.Status == "done" || prev.Status == "failed" {
-			return
-		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-		}
-		job, found := s.lookupJob(id)
-		if !found {
-			return
-		}
-		prev = *job
-	}
 }

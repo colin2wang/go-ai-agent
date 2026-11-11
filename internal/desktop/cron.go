@@ -1,4 +1,4 @@
-package main
+package desktop
 
 import (
 	"context"
@@ -30,7 +30,7 @@ func runCron(args []string) {
 	}
 	applyLogLevel(cfg.Logging.Level)
 
-	slog.Info("cron scheduler starting", "version", version, "interval", interval.String())
+	slog.Info("cron scheduler starting", "version", appVersion, "interval", interval.String())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -1,4 +1,4 @@
-package main
+package desktop
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"go-ai-agent/internal/config"
 	"go-ai-agent/internal/graph"
 	"go-ai-agent/internal/graph/nodes"
+	"go-ai-agent/internal/iolog"
 	"go-ai-agent/internal/llm"
 	"go-ai-agent/internal/stats"
-	"go-ai-agent/pkg/iolog"
 )
 
 // runCLI 单图审读（第一个参数为图片路径）：读配置 → 建 provider → 跑流水线 → 打印最终报告。

@@ -4,7 +4,7 @@ import Sidebar from './components/Sidebar.vue'
 import OverviewView from './views/OverviewView.vue'
 import FeatureView from './views/FeatureView.vue'
 import ChatView from './views/ChatView.vue'
-import { fetchFeatures, fetchOverview, health } from './api'
+import { fetchFeatures, fetchOverview, health, waitForBackend } from './api'
 import type { AppInfo, FeatureInfo, OverviewResponse, ProviderInfo } from './types'
 
 const appInfo = ref<AppInfo>({ name: 'go-ai-agent', title: 'AI 工作流平台', version: '' })
@@ -34,7 +34,11 @@ async function loadOverview() {
 
 async function boot() {
   booting.value = true
-  backendOk.value = await health()
+  // 桌面模式：先等 Wails 绑定注入完成，再短暂重试（SQLite 初始化期间调用也可能失败）
+  await waitForBackend()
+  for (let i = 0; i < 5 && !(backendOk.value = await health()); i++) {
+    await new Promise((r) => setTimeout(r, 400))
+  }
   if (backendOk.value) {
     try {
       const res = await fetchFeatures()

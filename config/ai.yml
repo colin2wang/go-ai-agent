@@ -58,7 +58,7 @@ llm:
       api-key: lm-studio
       timeout-seconds: 600
       connect-timeout-seconds: 10
-      max-tokens: 8192
+      max-tokens: 16384
 
     # 2) Ollama 本地服务（0.1.27+ 提供 OpenAI 兼容 /v1 端点）
     - name: ollama-local
@@ -67,15 +67,4 @@ llm:
       api-key: ollama
       timeout-seconds: 600
       connect-timeout-seconds: 10
-      max-tokens: 4096
-
-    # 3) OpenAI 兼容云端 / 网关（硅基流动、OneAPI、vLLM、OpenAI 官方等）
-    #    视觉模型（VLM，如 Qwen2.5-VL-7B-Instruct）同样复用以上端点，
-    #    无需单独声明 provider，由子功能步骤的 provider + model 指定即可。
-    - name: openai-cloud
-      type: openai-compatible
-      base-url: https://api.openai.com/v1
-      api-key: ${OPENAI_API_KEY:sk-your-key-here}
-      timeout-seconds: 120
-      connect-timeout-seconds: 10
-      max-tokens: 4096
+      max-tokens: 16384

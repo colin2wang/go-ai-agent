@@ -1,0 +1,15 @@
+{
+  "fixed": {
+    "file_version": "2026.1.0"
+  },
+  "info": {
+    "0409": {
+      "ProductVersion": "2026.1.0",
+      "CompanyName": "go-ai-agent",
+      "FileDescription": "AI 工作流平台（Wails 桌面应用）",
+      "LegalCopyright": "",
+      "ProductName": "harness",
+      "Comments": "LLM 工作流桌面应用"
+    }
+  }
+}

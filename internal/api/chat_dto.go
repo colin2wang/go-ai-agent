@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -132,15 +131,6 @@ func openaiV1URL(baseURL string) string {
 	b := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	b = strings.TrimSuffix(b, "/v1")
 	return b + "/v1"
-}
-
-// writeSSE 输出一个命名事件（data 为 JSON 单行）。
-func writeSSE(w io.Writer, event string, v any) {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return
-	}
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, raw)
 }
 
 // countChatImages 本次请求携带的图片总数（日志字段）。

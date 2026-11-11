@@ -1,4 +1,4 @@
-package main
+package desktop
 
 import (
 	"flag"
@@ -27,7 +27,7 @@ func runMQ(args []string) {
 	}
 	applyLogLevel(cfg.Logging.Level)
 
-	slog.Info("mq consumer starting", "version", version)
+	slog.Info("mq consumer starting", "version", appVersion)
 
 	// TODO: 连接消息队列 broker，订阅主题，并将收到的任务分派给工作流处理。
 	// 目前进程仅阻塞等待退出信号，保持骨架可编译、可运行。

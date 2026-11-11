@@ -2,12 +2,8 @@ package api
 
 import (
 	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -20,8 +16,6 @@ import (
 const (
 	defaultChatMaxImages  = 4
 	defaultChatMaxImageMB = 8
-	// 请求体硬上限：图片以 base64 内联（膨胀约 1.34 倍），按默认 4 张 × 8MB 量级放宽。
-	maxChatBodyBytes = 64 << 20
 )
 
 // allowedChatImageMimes 对话图片允许的媒体类型（OpenAI 兼容端点的普遍集合）。
@@ -133,37 +127,26 @@ func imageDataURL(img chatImage) string {
 	return "data:" + img.Mime + ";base64," + img.Data
 }
 
-// handleChatSend godoc
-// @Summary      发送对话消息（SSE 流式）
-// @Description  将消息列表转发到所选 provider 的 chat/completions；默认以 SSE 逐块下发（事件 meta/delta/done/error），端点不支持流式时自动降级为一次性 JSON（附 stream_fallback/note），stream=false 时直接一次性 JSON 返回。messages[].images 可附带图片（base64，仅视觉模型与 user 消息）
-// @Tags         chat
-// @Accept       json
-// @Produce      application/json,text/event-stream
-// @Param        body  body  chatSendRequest  true  "对话请求"
-// @Success      200  {string}  string  "SSE 事件流或完整响应"
-// @Failure      400  {object}  apiError
-// @Failure      404  {object}  apiError
-// @Router       /api/chat/send [post]
-func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
-	var req chatSendRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxChatBodyBytes)).Decode(&req); err != nil {
-		// 图片以 base64 内联，超限时只会读到截断的 JSON，这里给出可行动的提示
-		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-			fail(w, http.StatusRequestEntityTooLarge,
-				fmt.Sprintf("请求体超过 %dMB 上限，请减少图片数量或改用体积更小的图片", maxChatBodyBytes>>20))
-			return
-		}
-		fail(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
-		return
-	}
+// chatPrepared 一次对话请求经校验/回退后的完整参数（桌面端 ChatSend 使用）。
+type chatPrepared struct {
+	feature         config.Feature
+	provider        config.Provider
+	model           string
+	messages        []chatMessage
+	temperature     float64
+	maxTokens       int
+	stream          bool
+	reasoningEffort string
+}
+
+// chatPrepare 校验并补全一次对话请求：provider/model/温度/历史裁剪/图片校验。
+func (s *Server) chatPrepare(req chatSendRequest) (*chatPrepared, error) {
 	feature, ok := s.cfg.Feature(req.FeatureID)
 	if !ok || !feature.IsChat() {
-		fail(w, http.StatusNotFound, "对话子功能未启用或不存在: "+req.FeatureID)
-		return
+		return nil, fmt.Errorf("对话子功能未启用或不存在: %s", req.FeatureID)
 	}
 	if len(req.Messages) == 0 {
-		fail(w, http.StatusBadRequest, "messages 为空")
-		return
+		return nil, fmt.Errorf("messages 为空")
 	}
 
 	// provider：请求指定 > 子功能默认 > 全局默认
@@ -176,8 +159,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 	p, ok := s.factory.Provider(providerName)
 	if !ok {
-		fail(w, http.StatusBadRequest, "provider 未在 ai.yml 中声明: "+providerName)
-		return
+		return nil, fmt.Errorf("provider 未在 ai.yml 中声明: %s", providerName)
 	}
 	st := feature.Steps["chat"].WithDefaults(s.chatDefault(feature))
 	model := req.Model
@@ -188,8 +170,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	// 历史裁剪：只保留最近 max-history 条（system 由服务端统一注入）
 	messages := trimChatHistory(req.Messages, feature.Chat.MaxHistory)
 	if err := validateChatImages(messages, chatMaxImages(feature), chatMaxImageMB(feature)<<20); err != nil {
-		fail(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, err
 	}
 	if feature.Chat.SystemPrompt != "" {
 		messages = append([]chatMessage{{Role: "system", Content: feature.Chat.SystemPrompt}}, messages...)
@@ -208,18 +189,16 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		stream = *req.Stream
 	}
 
-	slog.Debug("chat send",
-		slog.String("feature", feature.ID),
-		slog.String("provider", providerName),
-		slog.String("model", model),
-		slog.Int("images", countChatImages(messages)),
-		slog.Bool("stream", stream))
-
-	if stream {
-		s.streamChat(w, r, p, model, messages, temperature, maxTokens, feature.Chat.ReasoningEffort)
-		return
-	}
-	s.collectChat(w, r, p, model, messages, temperature, maxTokens, feature.Chat.ReasoningEffort)
+	return &chatPrepared{
+		feature:         feature,
+		provider:        p,
+		model:           model,
+		messages:        messages,
+		temperature:     temperature,
+		maxTokens:       maxTokens,
+		stream:          stream,
+		reasoningEffort: feature.Chat.ReasoningEffort,
+	}, nil
 }
 
 // chatDefault 对话子功能的步骤回退值（provider/模型/参数取全局配置）。

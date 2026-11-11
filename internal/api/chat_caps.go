@@ -163,46 +163,32 @@ func detectModelCaps(id string, entry map[string]any) (vision, reasoning bool) {
 	return vision, reasoning
 }
 
-// handleChatModels godoc
-// @Summary      拉取 provider 的模型列表
-// @Description  代理 OpenAI 兼容端点 GET {base-url}/v1/models，附视觉/推理能力粗判，供对话子功能选择模型（query: provider）
-// @Tags         chat
-// @Produce      json
-// @Param        provider  query  string  true  "provider 名（ai.yml 中声明）"
-// @Success      200  {object}  map[string]any  "provider / base_url / models[]（chatModelInfo）"
-// @Failure      400  {object}  apiError
-// @Failure      502  {object}  apiError
-// @Router       /api/providers/models [get]
-func (s *Server) handleChatModels(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("provider")
+// providerModels 拉取 provider 的模型列表：代理 OpenAI 兼容端点
+// GET {base-url}/v1/models，附视觉/推理能力粗判，供对话子功能选择模型。
+func (s *Server) providerModels(ctx context.Context, name string) (map[string]any, error) {
 	p, ok := s.factory.Provider(name)
 	if !ok {
-		fail(w, http.StatusBadRequest, "provider 未在 ai.yml 中声明: "+name)
-		return
+		return nil, fmt.Errorf("provider 未在 ai.yml 中声明: %s", name)
 	}
 	client := s.factory.HTTPClient(p)
 	client.Timeout = 15 * time.Second // 列表接口不应等生成超时
-	resp, err := doProviderRequest(r.Context(), client, p, http.MethodGet, "/models", nil)
+	resp, err := doProviderRequest(ctx, client, p, http.MethodGet, "/models", nil)
 	if err != nil {
-		fail(w, http.StatusBadGateway, "请求模型列表失败: "+err.Error())
-		return
+		return nil, fmt.Errorf("请求模型列表失败: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		fail(w, http.StatusBadGateway, "读取模型列表失败: "+err.Error())
-		return
+		return nil, fmt.Errorf("读取模型列表失败: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		fail(w, http.StatusBadGateway, fmt.Sprintf("模型列表 HTTP %d: %s", resp.StatusCode, snippet(body)))
-		return
+		return nil, fmt.Errorf("模型列表 HTTP %d: %s", resp.StatusCode, snippet(body))
 	}
 	var doc struct {
 		Data []json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		fail(w, http.StatusBadGateway, "解析模型列表失败: "+err.Error())
-		return
+		return nil, fmt.Errorf("解析模型列表失败: %w", err)
 	}
 	models := make([]chatModelInfo, 0, len(doc.Data))
 	for _, raw := range doc.Data {
@@ -224,42 +210,30 @@ func (s *Server) handleChatModels(w http.ResponseWriter, r *http.Request) {
 	slices.SortFunc(models, func(a, b chatModelInfo) int {
 		return strings.Compare(strings.ToLower(a.ID), strings.ToLower(b.ID))
 	})
-	respond(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"provider":   p.Name,
 		"base_url":   p.BaseURL,
 		"models":     models,
 		"fetched_at": time.Now().Format(time.RFC3339),
-	})
+	}, nil
 }
 
-// handleChatStreamCheck godoc
-// @Summary      探测 provider 是否支持流式返回
-// @Description  向 chat/completions 发一条最小流式请求（max_tokens=1），按 SSE 首帧判断端点是否支持流式（query: provider、model）
-// @Tags         chat
-// @Produce      json
-// @Param        provider  query  string  true   "provider 名"
-// @Param        model     query  string  true   "模型名"
-// @Success      200  {object}  map[string]any  "provider / model / stream_supported / detail / latency_ms"
-// @Failure      400  {object}  apiError
-// @Router       /api/providers/stream-check [get]
-func (s *Server) handleChatStreamCheck(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("provider")
-	model := r.URL.Query().Get("model")
+// streamCheck 探测 provider 是否支持流式返回：向 chat/completions 发一条
+// 最小流式请求（max_tokens=1），按 SSE 首帧判断端点是否支持流式。
+func (s *Server) streamCheck(ctx context.Context, name, model string) (map[string]any, error) {
+	if model == "" {
+		return nil, fmt.Errorf("缺少 model 参数")
+	}
 	p, ok := s.factory.Provider(name)
 	if !ok {
-		fail(w, http.StatusBadRequest, "provider 未在 ai.yml 中声明: "+name)
-		return
-	}
-	if model == "" {
-		fail(w, http.StatusBadRequest, "缺少 model 参数")
-		return
+		return nil, fmt.Errorf("provider 未在 ai.yml 中声明: %s", name)
 	}
 	// 探测用短超时，避免界面长时间等待
 	client := s.factory.HTTPClient(p)
 	client.Timeout = 20 * time.Second
 
 	start := time.Now()
-	supported, detail := probeStream(r.Context(), client, p, model)
+	supported, detail := probeStream(ctx, client, p, model)
 	// 顺手写入能力缓存：流式结论端点级通用，视觉/推理保持缓存原值（未探测则启发式兜底）
 	if caps, ok := s.capsCache.get(name, model); ok {
 		caps.Stream, caps.StreamNote = supported, detail
@@ -274,14 +248,14 @@ func (s *Server) handleChatStreamCheck(w http.ResponseWriter, r *http.Request) {
 		s.capsCache.put(name, model, caps)
 		s.persistCaps(name, model, caps)
 	}
-	respond(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"provider":         p.Name,
 		"model":            model,
 		"stream_supported": supported,
 		"detail":           detail,
 		"latency_ms":       time.Since(start).Milliseconds(),
 		"checked_at":       time.Now().Format(time.RFC3339),
-	})
+	}, nil
 }
 
 // probeVisionColorWords 探测用纯色图（品红/magenta 系）的可接受答案词（小写匹配）。
@@ -420,49 +394,32 @@ func (s *Server) probeModelCaps(ctx context.Context, p config.Provider, model st
 	return caps
 }
 
-// probeMu 串行化探测：避免并发请求同一未缓存模型时重复打端点。
-// handleModelCaps godoc
-// @Summary      探测并缓存模型能力
-// @Description  对指定 provider+model 真实调用接口检测视觉/推理/流式能力并缓存；模型不变时直接返回缓存结果（query: provider、model、force=1 跳过缓存强制重测）
-// @Tags         chat
-// @Produce      json
-// @Param        provider  query  string  true   "provider 名"
-// @Param        model     query  string  true   "模型名"
-// @Param        force     query  string  false  "force=1 强制重新探测"
-// @Success      200  {object}  map[string]any  "provider / model / vision / reasoning / stream / cached / probed_at"
-// @Failure      400  {object}  apiError
-// @Router       /api/providers/caps [get]
-func (s *Server) handleModelCaps(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("provider")
-	model := r.URL.Query().Get("model")
-	force := r.URL.Query().Get("force") == "1"
+// modelCapsFor 探测并缓存模型能力：对指定 provider+model 真实调用接口检测
+// 视觉/推理/流式能力并缓存；模型不变时直接返回缓存结果（force 跳过缓存强制重测）。
+func (s *Server) modelCapsFor(ctx context.Context, name, model string, force bool) (map[string]any, error) {
 	p, ok := s.factory.Provider(name)
 	if !ok {
-		fail(w, http.StatusBadRequest, "provider 未在 ai.yml 中声明: "+name)
-		return
+		return nil, fmt.Errorf("provider 未在 ai.yml 中声明: %s", name)
 	}
 	if model == "" {
-		fail(w, http.StatusBadRequest, "缺少 model 参数")
-		return
+		return nil, fmt.Errorf("缺少 model 参数")
 	}
 	if !force {
 		if caps, ok := s.capsCache.get(name, model); ok {
-			respond(w, http.StatusOK, capsResponse(p, model, caps, true))
-			return
+			return capsResponse(p, model, caps, true), nil
 		}
 	}
 	// 单飞：同 key 并发请求只探测一次（先到者写缓存，其余读缓存）
 	s.probeLock.Lock()
 	if caps, ok := s.capsCache.get(name, model); ok && !force {
 		s.probeLock.Unlock()
-		respond(w, http.StatusOK, capsResponse(p, model, caps, true))
-		return
+		return capsResponse(p, model, caps, true), nil
 	}
-	caps := s.probeModelCaps(r.Context(), p, model)
+	caps := s.probeModelCaps(ctx, p, model)
 	s.capsCache.put(name, model, caps)
 	s.probeLock.Unlock()
 	s.persistCaps(name, model, caps) // 真实探测结果落库，重启免重测
-	respond(w, http.StatusOK, capsResponse(p, model, caps, false))
+	return capsResponse(p, model, caps, false), nil
 }
 
 // capsResponse 组装能力探测响应。

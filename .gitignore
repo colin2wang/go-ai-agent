@@ -2,7 +2,9 @@
 .idea/
 
 # Output
-dist/
+build/bin/
+# wails build 生成的绑定包装（可再生，前端经 window.go 直连，不 import 这些包装）
+web/wailsjs/
 # Embed 目录内容不入库，但保留占位页 index.html，确保未跑前端构建时 go test / go build 也能通过
 internal/api/webdist/*
 !internal/api/webdist/index.html

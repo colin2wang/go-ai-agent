@@ -1,3 +1,8 @@
+/**
+ * 后端调用层（Wails 桌面模式）：全部经 window.go.main.App 绑定方法直连 Go，
+ * 聊天流式响应经 window.runtime 事件推送（频道 "chat:<reqID>"），
+ * 不再有任何 HTTP 请求。
+ */
 import type {
   ChatCollectResponse,
   ChatDoneEvent,
@@ -11,32 +16,115 @@ import type {
   ProviderModels,
   ModelCaps,
 } from './types'
-import { createSSEParser, type SSEEvent } from './sse'
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url)
-  const data: unknown = await res.json()
-  if (!res.ok) {
-    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
+// ===== Wails 运行时与绑定对象的最小类型声明 =====
+
+interface WailsEvents {
+  /** 订阅事件，返回解绑函数。适配 Wails v2 的扁平 runtime API（EventsOn/EventsOff）。 */
+  on(eventName: string, callback: (...data: unknown[]) => void): () => void
+  off(eventName: string): void
+}
+
+interface WailsRuntime {
+  EventsOn?: WailsEvents['on']
+  EventsOff?: (eventName: string, ...additionalEventNames: string[]) => void
+  /** 旧版命名空间形式（保留兼容）。 */
+  Events?: WailsEvents
+}
+
+interface WailsBindings {
+  go: {
+    api: {
+      App: {
+        Features(): Promise<FeaturesResponse>
+        Overview(days: number): Promise<OverviewResponse>
+        Health(): Promise<boolean>
+        Job(id: string): Promise<JobResult>
+        RunFeature(
+          featureID: string,
+          files: { name: string; data: string }[],
+          extra: Record<string, string>,
+          asyncOverride: boolean | null,
+        ): Promise<JobResult>
+        ProviderCheck(provider: string): Promise<ProviderCheckResponse>
+        ProviderModels(provider: string): Promise<ProviderModels>
+        ModelCaps(provider: string, model: string, force: boolean): Promise<ModelCaps>
+        StreamCheck(provider: string, model: string): Promise<unknown>
+        ChatSend(reqID: string, req: ChatSendRequest): Promise<ChatSendAck>
+        ChatCancel(reqID: string): Promise<void>
+      }
+    }
   }
-  return data as T
+  runtime: WailsRuntime
+}
+
+/** ChatSend 流式模式的返回（一次性结果则直接带 collect 字段）。 */
+interface ChatSendAck {
+  mode: 'stream' | 'collect'
+  provider?: string
+  model?: string
+  [key: string]: unknown
+}
+
+// 绑定命名空间 = App 结构体所在的 Go 包名（api），见 web/wailsjs/go/api/App.d.ts
+function backend(): WailsBindings['go']['api']['App'] {
+  return (window as unknown as WailsBindings).go.api.App
+}
+
+/**
+ * 等待 Wails 绑定就绪：窗口刚打开时 window.go / window.runtime 可能尚未注入，
+ * 轮询直到可用（超时返回 false，避免页面一次性报“后端不可用”）。
+ */
+export async function waitForBackend(timeoutMs = 10000): Promise<boolean> {
+  const w = window as unknown as Partial<WailsBindings>
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (w.go?.api?.App && (w.runtime?.EventsOn || w.runtime?.Events)) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((r) => setTimeout(r, 100))
+  }
+}
+
+function events(): WailsEvents {
+  const runtime = (window as unknown as WailsBindings).runtime
+  // Wails v2 在 window.runtime 上直接挂 EventsOn/EventsOff（无 Events 命名空间）
+  if (typeof runtime?.EventsOn === 'function' && typeof runtime?.EventsOff === 'function') {
+    return {
+      on: (name, cb) => {
+        runtime.EventsOn!(name, cb)
+        return () => runtime.EventsOff!(name)
+      },
+      off: (name) => runtime.EventsOff!(name),
+    }
+  }
+  return runtime!.Events!
+}
+
+/** File → 纯 base64（不含 data: 前缀）。 */
+async function fileToBase64(f: File): Promise<string> {
+  const buf = await f.arrayBuffer()
+  let binary = ''
+  const bytes = new Uint8Array(buf)
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
 }
 
 /** 子功能清单（左侧菜单 + 流程链）。 */
 export function fetchFeatures(): Promise<FeaturesResponse> {
-  return getJSON<FeaturesResponse>('/api/features')
+  return backend().Features()
 }
 
 /** 概览统计（默认最近 14 天）。 */
 export function fetchOverview(days = 14): Promise<OverviewResponse> {
-  return getJSON<OverviewResponse>(`/api/overview?days=${days}`)
+  return backend().Overview(days)
 }
 
-/**
- * 查询任务（异步模式轮询用）。
- */
-export async function fetchJob(id: string): Promise<JobResult> {
-  return getJSON<JobResult>(`/api/jobs/${encodeURIComponent(id)}`)
+/** 查询任务（异步模式轮询用）。 */
+export function fetchJob(id: string): Promise<JobResult> {
+  return backend().Job(id)
 }
 
 /** 异步任务轮询默认间隔 ms（本地推理任务秒级变化，2s 足够且不打扰后端） */
@@ -44,9 +132,9 @@ const JOB_POLL_MS = 2000
 
 /**
  * 执行指定子功能工作流（异步）。
- * 后端 accept 202 返回 job_id + processing：随后轮询 /api/jobs/{id}，
+ * 后端启用 persist-jobs 时返回 job_id + processing：随后轮询 Job(id)，
  * 每次进度更新回调 onProgress，直到 done/failed 返回终态。
- * 后端未开异步时直接返回完成态（与旧版同步行为兼容，不轮询）。
+ * 同步模式直接返回完成态（不轮询）。
  */
 export async function runFeatureAsync(
   id: string,
@@ -69,36 +157,18 @@ export async function runFeatureAsync(
 
 /**
  * 执行指定子功能工作流（同步等待，兼容旧行为）。
- * 单文件用 file 字段，多页（如扫描版图书目录）用 files 字段，后端同时兼容。
- * signal 支持中断等待（仅断开本次请求，后台异步任务不受影响）。
+ * 文件字节以 base64 直传绑定方法；extra 为子功能声明的额外参数（如目标语言）。
  */
 export async function runFeature(
   id: string,
   files: File | File[],
-  opts?: { async?: boolean; signal?: AbortSignal; extra?: Record<string, string> },
+  opts?: { extra?: Record<string, string> },
 ): Promise<JobResult> {
   const list = Array.isArray(files) ? files : [files]
-  const form = new FormData()
-  if (list.length > 1) {
-    for (const f of list) form.append('files', f)
-  } else {
-    form.append('file', list[0])
-  }
-  // 额外表单参数由子功能的 input 声明驱动（如目标语言），后端按白名单校验
-  if (opts?.extra) {
-    for (const [k, v] of Object.entries(opts.extra)) form.append(k, v)
-  }
-  const q = opts?.async === true ? '?async=1' : opts?.async === false ? '?async=0' : ''
-  const res = await fetch(`/api/features/${encodeURIComponent(id)}/run${q}`, {
-    method: 'POST',
-    body: form,
-    signal: opts?.signal,
-  })
-  const data: unknown = await res.json()
-  if (!res.ok && res.status !== 202) {
-    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
-  }
-  return data as JobResult
+  const uploads = await Promise.all(
+    list.map(async (f) => ({ name: f.name || 'upload.png', data: await fileToBase64(f) })),
+  )
+  return backend().RunFeature(id, uploads, opts?.extra ?? {}, null)
 }
 
 /** 工资单场景快捷入口（等价于 runFeature('payslip-ocr', file)）。 */
@@ -111,23 +181,14 @@ export function reviewPayslip(file: File): Promise<JobResult> {
  * 不传 provider 则一次并发测试全部端点；仅在页面加载或用户手动点击时调用，不做实时轮询。
  */
 export async function checkProviders(provider?: string): Promise<ProviderCheck[]> {
-  const res = await fetch('/api/providers/check', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(provider ? { provider } : {}),
-  })
-  const data: unknown = await res.json()
-  if (!res.ok) {
-    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
-  }
-  return (data as ProviderCheckResponse).results
+  const res = await backend().ProviderCheck(provider ?? '')
+  return res.results
 }
 
-/** 健康检查。 */
+/** 健康检查（桌面模式下后端随窗口常驻，恒可用）。 */
 export async function health(): Promise<boolean> {
   try {
-    const res = await fetch('/api/health')
-    return res.ok
+    return await backend().Health()
   } catch {
     return false
   }
@@ -136,85 +197,88 @@ export async function health(): Promise<boolean> {
 // ===== 对话（AI Chat）=====
 
 /** 拉取指定 provider 的模型列表（后端代理 OpenAI 兼容 GET /v1/models）。 */
-export async function fetchProviderModels(provider: string): Promise<ProviderModels> {
-  const res = await fetch(`/api/providers/models?provider=${encodeURIComponent(provider)}`)
-  const data: unknown = await res.json()
-  if (!res.ok) {
-    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
-  }
-  return data as ProviderModels
+export function fetchProviderModels(provider: string): Promise<ProviderModels> {
+  return backend().ProviderModels(provider)
 }
 
 /** 探测指定模型的能力（后端缓存，模型不变时直接返回缓存结果）。 */
-export async function fetchModelCaps(provider: string, model: string): Promise<ModelCaps> {
-  const res = await fetch(
-    `/api/providers/caps?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`,
-  )
-  const data: unknown = await res.json()
-  if (!res.ok) {
-    throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`)
-  }
-  return data as ModelCaps
+export function fetchModelCaps(provider: string, model: string): Promise<ModelCaps> {
+  return backend().ModelCaps(provider, model, false)
 }
 
 /**
- * 发送对话消息。stream=true 时解析 SSE 事件（meta/delta/done）分发回调；
- * 端点不支持流式时后端自动降级，此时按一次性 JSON 返回 ChatCollectResponse（stream_fallback/note）。
- * signal 支持中途停止生成。
+ * 发送对话消息。stream=true 时经 Wails 事件分发回调（meta/delta/done）；
+ * 端点不支持流式时后端自动降级，经 collect 事件返回 ChatCollectResponse
+ * （stream_fallback/note）。signal 支持中途停止生成（ChatCancel）。
  */
 export async function sendChat(
   req: ChatSendRequest,
   handlers: ChatStreamHandlers,
   signal?: AbortSignal,
 ): Promise<ChatCollectResponse | null> {
-  const res = await fetch('/api/chat/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
-    signal,
-  })
-  const ctype = res.headers.get('content-type') ?? ''
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`
-    try {
-      const data: unknown = await res.json()
-      msg = (data as { error?: string }).error ?? msg
-    } catch {
-      /* 忽略非 JSON 错误体 */
+  const reqID = crypto.randomUUID()
+  const channel = `chat:${reqID}`
+  let settled = false
+
+  return new Promise<ChatCollectResponse | null>((resolve, reject) => {
+    const cleanup = () => {
+      if (settled) return
+      settled = true
+      events().off(channel)
+      signal?.removeEventListener('abort', onAbort)
     }
-    throw new Error(msg)
-  }
-  if (!ctype.includes('text/event-stream')) {
-    return (await res.json()) as ChatCollectResponse
-  }
+    const fail = (err: unknown) => {
+      cleanup()
+      reject(err instanceof Error ? err : new Error(String(err)))
+    }
 
-  const reader = res.body?.getReader()
-  if (!reader) throw new Error('浏览器不支持流式读取')
-  const decoder = new TextDecoder()
-  // 事件可能跨 chunk、服务端可能用 CRLF，解析交给独立的增量解析器（见 sse.ts）
-  const parser = createSSEParser()
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    const events = parser.push(decoder.decode(value, { stream: true }))
-    for (const ev of events) dispatchSSEEvent(ev, handlers)
-  }
-  // 流结束时补解析一次（上游未以空行结尾的最后一个事件）
-  for (const ev of parser.flush()) dispatchSSEEvent(ev, handlers)
-  return null
-}
+    const onAbort = () => {
+      void backend().ChatCancel(reqID)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
 
-/** 把一个已解析的 SSE 事件派发给对应回调。 */
-function dispatchSSEEvent(ev: SSEEvent, handlers: ChatStreamHandlers): void {
-  let payload: unknown
-  try {
-    payload = JSON.parse(ev.data)
-  } catch {
-    return // 非法 JSON 片段丢弃，不中断整条流
-  }
-  if (ev.event === 'meta') handlers.onMeta?.(payload as { provider: string; model: string })
-  else if (ev.event === 'delta')
-    handlers.onDelta?.(payload as { type: 'answer' | 'reasoning'; text: string })
-  else if (ev.event === 'done') handlers.onDone?.(payload as ChatDoneEvent)
-  else if (ev.event === 'error') throw new Error((payload as { error?: string }).error ?? '生成失败')
+    // 先订阅再发送：事件早于 ChatSend 返回也不会丢
+    events().on(channel, (...args: unknown[]) => {
+      const payload = args[0] as { event?: string; data?: unknown } | undefined
+      if (!payload?.event) return
+      try {
+        switch (payload.event) {
+          case 'meta':
+            handlers.onMeta?.(payload.data as { provider: string; model: string })
+            break
+          case 'delta':
+            handlers.onDelta?.(payload.data as { type: 'answer' | 'reasoning'; text: string })
+            break
+          case 'done':
+            handlers.onDone?.(payload.data as ChatDoneEvent)
+            cleanup()
+            resolve(null)
+            break
+          case 'collect': {
+            // 非流式一次性结果（含流式降级路径）
+            cleanup()
+            resolve(payload.data as ChatCollectResponse)
+            break
+          }
+          case 'error':
+            fail(new Error((payload.data as { error?: string }).error ?? '生成失败'))
+            break
+        }
+      } catch (err) {
+        fail(err)
+      }
+    })
+
+    void backend()
+      .ChatSend(reqID, req)
+      .then((ack) => {
+        if (ack.mode === 'collect') {
+          // 非流式：完整结果直接在返回值里（理论上同时有 collect 事件，取先到者）
+          cleanup()
+          const { mode: _mode, ...rest } = ack
+          resolve(rest as unknown as ChatCollectResponse)
+        }
+      })
+      .catch(fail)
+  })
 }

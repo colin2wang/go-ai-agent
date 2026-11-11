@@ -1,0 +1,9 @@
+# 仓库统一 LF：跨平台协作与 diff 稳定
+* text=auto eol=lf
+
+# Windows 脚本约定：PowerShell 在 Windows 上要求 CRLF 才能可靠执行
+*.ps1 text eol=crlf
+
+# 二进制资源：git 完全不碰（never touch，防止行尾归一化损坏）
+*.png binary
+*.ico binary

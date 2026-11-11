@@ -747,7 +747,7 @@ cd web && pnpm test # 前端（vitest，build.ps1 在前端构建前执行）
 | `internal/llm` | `StreamAccumulator`（跨 chunk / UTF-8 边界 / 并发 / 推理分道）、缓存键（含多模态图片摘要）与缓存策略 |
 | `internal/stats` | 任务状态机、结果编解码、孤儿任务回收、能力探测持久化与过期、缓存命中/过期/LRU 淘汰、任务过滤分页、旧库升级 |
 | `internal/api` | 鉴权（Bearer / X-API-Key / health 豁免）、异步任务生命周期、SSE 进度流、启动期孤儿回收、内存态回退与淘汰、Swagger 开关、安全响应头 |
-| `pkg/iolog` | head/tail 截断、token 提取、nil/禁用安全性 |
+| `internal/iolog` | head/tail 截断、token 提取、nil/禁用安全性 |
 | `web/` | SSE 解析器（跨 chunk、CRLF、多行 `data`、注释行、末尾无分隔符）、`sendChat` / `runFeatureAsync`（mock fetch） |
 
 ## API 摘要
