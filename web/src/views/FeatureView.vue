@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
-import { runFeatureAsync } from '../api'
+import { fetchJob, fetchJobs, runFeatureAsync } from '../api'
+import { pushLog } from '../logstore'
 import { duration, thousand } from '../chart'
 import type { FeatureInfo, JobResult, TOCEntry } from '../types'
 
@@ -38,6 +39,21 @@ const hint = computed(() => props.feature.input?.hint ?? '本地模型处理通�
 const langParam = computed(() => props.feature.input?.target_language ?? null)
 const targetLang = ref(langParam.value?.default ?? '')
 
+// ---- 批次大小（批量翻译类子功能）：单选预设 + 自定义输入（0-200），默认 50 ----
+const BATCH_OPTIONS = ['20', '50', '100'] as const
+const batchChoice = ref<'20' | '50' | '100' | 'custom'>('50')
+const batchCustom = ref('')
+const showBatch = computed(() => !!props.feature.pipeline?.includes('translate'))
+
+/** 提交给后端的 batch_size：预设直接用；自定义取输入值（0-200 之外视为未提交）。 */
+const batchSize = computed<number | null>(() => {
+  if (!showBatch.value) return null
+  if (batchChoice.value !== 'custom') return Number(batchChoice.value)
+  const n = Math.floor(Number(batchCustom.value))
+  if (!Number.isFinite(n) || n < 0 || n > 200) return null
+  return n
+})
+
 /** 上传限制提示（取自后端下发的 input 上限，便于用户提前知情）。 */
 const limitText = computed(() => {
   const inp = props.feature.input
@@ -69,6 +85,70 @@ const progress = ref<JobResult | null>(null)
 /** 本地计时（ms）：任务排队/执行中的已等待时长。 */
 const elapsed = ref(0)
 let timer = 0
+
+/** 本子功能的历史任务（后端 jobs 表，按创建时间倒序）。 */
+const jobs = ref<JobResult[]>([])
+
+async function loadJobs() {
+  try {
+    jobs.value = await fetchJobs(props.feature.id, 20)
+  } catch {
+    /* 列表加载失败不阻塞页面 */
+  }
+}
+
+/** 查看某条历史任务的完整结果。 */
+async function viewJob(id: string) {
+  error.value = ''
+  try {
+    result.value = await fetchJob(id)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/**
+ * 恢复未完成任务：切页回来（组件重新挂载）后，若该子功能仍有
+ * pending/running 任务则继续轮询，直到终态后拉取完整结果。
+ */
+function resumeRunningJob() {
+  if (loading.value) return
+  const running = jobs.value.find((j) => j.status === 'pending' || j.status === 'running')
+  if (!running) return
+  pushLog('info', `发现未完成任务 ${running.job_id.slice(0, 8)}，继续跟踪进度`)
+  loading.value = true
+  progress.value = running
+  elapsed.value = 0
+  const startedAt = Date.now()
+  timer = window.setInterval(() => (elapsed.value = Date.now() - startedAt), 500)
+  void (async () => {
+    try {
+      for (;;) {
+        const job = await fetchJob(running.job_id)
+        progress.value = job
+        if (job.status === 'done' || job.status === 'failed') {
+          result.value = job
+          if (job.status === 'done') {
+            pushLog('info', `[${props.feature.id}] 恢复的任务 ${running.job_id.slice(0, 8)} 已完成`)
+          } else {
+            pushLog('error', `[${props.feature.id}] 任务 ${running.job_id.slice(0, 8)} 失败：${job.error || '未知原因'}`)
+          }
+          break
+        }
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+      emit('done')
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      loading.value = false
+      progress.value = null
+      window.clearInterval(timer)
+      timer = 0
+      void loadJobs()
+    }
+  })()
+}
 
 function clearPreviews() {
   previews.value.forEach((p) => URL.revokeObjectURL(p.url))
@@ -189,12 +269,14 @@ async function submit() {
   elapsed.value = 0
   const startedAt = Date.now()
   timer = window.setInterval(() => (elapsed.value = Date.now() - startedAt), 500)
+  pushLog('info', `[${props.feature.id}] 开始执行：${files.value.length} 个文件`)
   try {
     // 后端启用 persist-jobs 时为异步：下方轮询回调逐次刷新 progress；
     // 未启用时首次调用即返回终态，行为与旧版一致。
     // 声明了目标语言下拉框的子功能把选中值作为 target_lang 表单字段提交。
-    const extra =
-      langParam.value && targetLang.value ? { target_lang: targetLang.value } : undefined
+    const extra: Record<string, string> = {}
+    if (langParam.value && targetLang.value) extra.target_lang = targetLang.value
+    if (batchSize.value !== null) extra.batch_size = String(batchSize.value)
     result.value = await runFeatureAsync(
       props.feature.id,
       files.value,
@@ -204,14 +286,21 @@ async function submit() {
       undefined,
       extra,
     )
+    if (result.value.status === 'done') {
+      pushLog('info', `[${props.feature.id}] 执行完成（${duration(result.value.duration_ms)}）`)
+    } else if (result.value.status === 'failed') {
+      pushLog('error', `[${props.feature.id}] 执行失败：${result.value.error || '未知原因'}`)
+    }
     emit('done')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+    pushLog('error', `[${props.feature.id}] 提交失败：${error.value}`)
   } finally {
     loading.value = false
     progress.value = null
     window.clearInterval(timer)
     timer = 0
+    void loadJobs()
   }
 }
 
@@ -260,7 +349,11 @@ function download() {
   URL.revokeObjectURL(url)
 }
 
-onMounted(() => window.addEventListener('paste', onPaste))
+onMounted(() => {
+  window.addEventListener('paste', onPaste)
+  // 先拉历史任务，再从中恢复可能仍在执行的任务（切页回来不丢进度）
+  void loadJobs().then(resumeRunningJob)
+})
 onBeforeUnmount(() => {
   window.removeEventListener('paste', onPaste)
   clearPreviews()
@@ -280,11 +373,8 @@ onBeforeUnmount(() => {
     <div class="pipeline card">
       <span class="pipeline-label">工作流</span>
       <template v-for="(s, i) in pipeline" :key="s.name">
-        <span class="pipeline-node">
-          <AppIcon :name="s.icon" :size="14" />
-          {{ s.label }}
-        </span>
-        <span v-if="i < pipeline.length - 1" class="pipeline-arrow">→</span>
+        <span class="pipeline-node">{{ s.name }}</span>
+        <span v-if="i < pipeline.length - 1" class="pipeline-arrow">─▶</span>
       </template>
       <span v-if="feature.output?.template" class="pipeline-tag">
         <AppIcon name="doc" :size="13" />
@@ -323,13 +413,18 @@ onBeforeUnmount(() => {
             <span class="drop-sub">{{ hint }}</span>
           </template>
           <div v-else class="thumbs" :class="{ multi: multiple }">
-            <figure v-for="(p, i) in previews" :key="p.url" class="thumb">
+            <figure
+              v-for="(p, i) in previews"
+              :key="p.url"
+              class="thumb"
+              :class="{ 'file-fig': !p.isImage }"
+            >
               <img v-if="p.isImage" :src="p.url" :alt="p.name" />
               <div v-else class="thumb-file">
-                <AppIcon name="doc" :size="26" />
-                <span class="thumb-file-name">{{ p.name }}</span>
+                <AppIcon name="doc" :size="18" />
+                <span class="thumb-file-name" :title="p.name">{{ p.name }}</span>
               </div>
-              <figcaption>
+              <figcaption v-if="p.isImage">
                 <span v-if="multiple" class="thumb-index">{{ i + 1 }}</span>
                 <span class="thumb-name">{{ p.name }}</span>
               </figcaption>
@@ -345,6 +440,42 @@ onBeforeUnmount(() => {
           <select id="target-lang" v-model="targetLang" class="field-select" :disabled="loading">
             <option v-for="opt in langParam.options" :key="opt" :value="opt">{{ opt }}</option>
           </select>
+        </div>        <div v-if="showBatch" class="field-row">
+          <span class="field-label">批次大小（每批送模型翻译的字幕条数）</span>
+          <div class="batch-group" role="radiogroup" aria-label="批次大小">
+            <label v-for="opt in BATCH_OPTIONS" :key="opt" class="batch-opt">
+              <input
+                v-model="batchChoice"
+                type="radio"
+                name="batch-size"
+                :value="String(opt)"
+                :disabled="loading"
+              />
+              <span class="num">{{ opt }}</span>
+            </label>
+            <label class="batch-opt custom">
+              <input
+                v-model="batchChoice"
+                type="radio"
+                name="batch-size"
+                value="custom"
+                :disabled="loading"
+              />
+              <span>自定义</span>
+              <input
+                v-model="batchCustom"
+                class="batch-input num"
+                type="number"
+                min="0"
+                max="200"
+                step="1"
+                placeholder="0-200"
+                :disabled="loading || batchChoice !== 'custom'"
+                @focus="batchChoice = 'custom'"
+              />
+            </label>
+          </div>
+          <span class="field-hint">批次越大总耗时越短，但单次译文更易被截断后触发逐条重译</span>
         </div>
 
         <div class="actions">
@@ -482,7 +613,6 @@ onBeforeUnmount(() => {
 
         <div v-else-if="loading" class="running">
           <header class="running-head">
-            <span class="spinner" />
             <p class="running-title">{{ progress?.detail || '任务执行中…' }}</p>
             <p class="running-elapsed">已等待 {{ duration(elapsed) }}</p>
           </header>
@@ -502,6 +632,25 @@ onBeforeUnmount(() => {
           <p class="running-hint">
             {{ feature.async ? '任务已落库，刷新或切换到其他页面不会中断执行。' : '本页同步等待结果返回。' }}
           </p>
+        </div>
+
+        <div v-else-if="jobs.length" class="history">
+          <p class="history-title">历史任务</p>
+          <button
+            v-for="j in jobs"
+            :key="j.job_id"
+            type="button"
+            class="history-row"
+            :disabled="j.status === 'pending' || j.status === 'running'"
+            @click="viewJob(j.job_id)"
+          >
+            <span class="history-id num">{{ j.job_id.slice(0, 8) }}</span>
+            <span class="state num" :class="j.status === 'done' ? 'ok' : j.status === 'failed' ? 'fail' : 'wait'">
+              {{ j.status }}
+            </span>
+            <span class="history-detail" :title="j.detail">{{ j.detail || '—' }}</span>
+            <span class="history-time num">{{ (j.updated_at || j.created_at || '').slice(5, 16) }}</span>
+          </button>
         </div>
 
         <div v-else class="placeholder">
@@ -554,20 +703,14 @@ onBeforeUnmount(() => {
 }
 
 .pipeline-node {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 11px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 .pipeline-arrow {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .pipeline-tag {
@@ -575,17 +718,14 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 5px;
   margin-left: auto;
-  padding: 5px 11px;
-  border-radius: 999px;
-  background: var(--purple-soft);
-  color: var(--purple);
-  font-size: 12px;
-  font-weight: 700;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
 
 .grid {
   display: grid;
-  grid-template-columns: 380px minmax(0, 1fr);
+  grid-template-columns: 1fr;
   gap: 14px;
   align-items: start;
 }
@@ -604,18 +744,17 @@ onBeforeUnmount(() => {
   margin: 16px 20px;
   padding: 26px 18px;
   min-height: 208px;
-  border: 1.5px dashed var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+  background: transparent;
   cursor: pointer;
   text-align: center;
-  transition: border-color 0.16s ease, background 0.16s ease;
+  transition: border-color 0.12s ease;
 }
 
 .dropzone:hover,
 .dropzone.dragging {
-  border-color: var(--blue);
-  background: var(--blue-soft);
+  border-color: var(--accent);
 }
 
 .dropzone.filled {
@@ -627,15 +766,94 @@ onBeforeUnmount(() => {
   display: none;
 }
 
+/* ---- 目标语言选择：标签在上、下拉通栏 ---- */
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 20px;
+  margin-bottom: 14px;
+}
+
+.field-label {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.field-select {
+  height: 34px;
+  width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.field-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.field-hint {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+/* ---- 批次大小单选组 ---- */
+.batch-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.batch-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.batch-opt input[type='radio'] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.batch-opt.custom .batch-input {
+  width: 76px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.batch-opt.custom .batch-input:disabled {
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+
+.batch-opt.custom .batch-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .drop-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 44px;
   height: 44px;
-  border-radius: 14px;
+  border-radius: var(--r-sm);
   background: var(--surface);
-  color: var(--blue);
+  color: var(--accent);
   border: 1px solid var(--border);
 }
 
@@ -681,6 +899,27 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 120px;
   object-fit: cover;
+}
+
+/* 非图片文件（如 .srt）：整行横排文件卡，文件名单行省略 */
+.file-fig {
+  width: 100%;
+}
+
+.thumb-file {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 34px 10px 12px;
+  color: var(--text-2);
+}
+
+.thumb-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
 }
 
 .thumb figcaption {
@@ -925,6 +1164,76 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+/* ---- 历史任务列表 ---- */
+.history {
+  padding: 8px 20px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-title {
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 8px 0 4px;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.history-row:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.history-row:disabled {
+  cursor: default;
+}
+
+.history-id {
+  flex: none;
+}
+
+.state {
+  flex: none;
+  font-size: 11.5px;
+}
+
+.state.ok {
+  color: var(--ok);
+}
+
+.state.fail {
+  color: var(--err);
+}
+
+.state.wait {
+  color: var(--text-3);
+}
+
+.history-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-time {
+  flex: none;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
 /* ---- 执行中进度 ---- */
 .running {
   margin: 16px 20px 0;
@@ -937,22 +1246,6 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 9px;
-}
-
-.spinner {
-  width: 14px;
-  height: 14px;
-  flex: none;
-  border-radius: 50%;
-  border: 2px solid var(--border);
-  border-top-color: var(--blue);
-  animation: spin 0.75s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .running-title {
@@ -973,16 +1266,15 @@ onBeforeUnmount(() => {
 
 .bar {
   margin-top: 12px;
-  height: 6px;
-  border-radius: 999px;
+  height: 3px;
+  border-radius: 2px;
   background: var(--border);
   overflow: hidden;
 }
 
 .bar-fill {
   height: 100%;
-  border-radius: 999px;
-  background: var(--blue);
+  background: var(--accent);
   transition: width 0.4s ease;
 }
 
@@ -1042,7 +1334,10 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1180px) {
-  .grid {
+  .grid-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid-two {
     grid-template-columns: 1fr;
   }
 }

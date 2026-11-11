@@ -40,6 +40,7 @@ interface WailsBindings {
         Overview(days: number): Promise<OverviewResponse>
         Health(): Promise<boolean>
         Job(id: string): Promise<JobResult>
+        Jobs(featureID: string, limit: number): Promise<JobResult[]>
         RunFeature(
           featureID: string,
           files: { name: string; data: string }[],
@@ -125,6 +126,11 @@ export function fetchOverview(days = 14): Promise<OverviewResponse> {
 /** 查询任务（异步模式轮询用）。 */
 export function fetchJob(id: string): Promise<JobResult> {
   return backend().Job(id)
+}
+
+/** 列出子功能最近的任务（不含大结果字段，查看完整结果用 fetchJob）。 */
+export function fetchJobs(featureID: string, limit = 20): Promise<JobResult[]> {
+  return backend().Jobs(featureID, limit)
 }
 
 /** 异步任务轮询默认间隔 ms（本地推理任务秒级变化，2s 足够且不打扰后端） */

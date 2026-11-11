@@ -110,6 +110,24 @@ func (a *App) Job(id string) (*JobResult, error) {
 	return job, nil
 }
 
+// Jobs 列出某子功能最近的任务（不含大结果字段，查看完整结果用 Job(id)）。
+// featureID 为空时返回全部子功能的任务；limit<=0 或超限归一为 50。
+func (a *App) Jobs(featureID string, limit int) ([]*JobResult, error) {
+	store := a.srv.jobsStore()
+	if store == nil {
+		return nil, nil
+	}
+	rows, err := store.Query(stats.JobFilter{Feature: featureID, Limit: limit})
+	if err != nil {
+		return nil, fmt.Errorf("查询任务列表失败: %w", err)
+	}
+	out := make([]*JobResult, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, jobView(row))
+	}
+	return out, nil
+}
+
 // ProviderCheck 端点连通性探测：provider 为空则并发测试全部端点。
 func (a *App) ProviderCheck(provider string) map[string]any {
 	names := make([]string, 0, len(a.srv.cfg.LLM.Providers))

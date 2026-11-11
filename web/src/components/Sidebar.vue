@@ -52,6 +52,7 @@ function switchTheme(t: Theme) {
       >
         <AppIcon :name="f.icon || 'receipt'" :size="17" />
         <span class="nav-label">{{ f.name }}</span>
+        <span class="nav-type">{{ f.kind }}</span>
       </button>
       <p v-if="!features.length" class="nav-empty">暂无启用的子功能</p>
     </nav>
@@ -84,10 +85,6 @@ function switchTheme(t: Theme) {
   padding: 22px 16px 18px;
   background: var(--surface);
   border-right: 1px solid var(--border);
-  backdrop-filter: saturate(180%) blur(18px);
-  position: sticky;
-  top: 0;
-  height: 100vh;
 }
 
 .brand {
@@ -122,7 +119,7 @@ function switchTheme(t: Theme) {
 
 .brand-title {
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
@@ -156,17 +153,18 @@ function switchTheme(t: Theme) {
 }
 
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 9px 11px;
-  border-radius: 12px;
+  padding: 8px 11px;
+  border-radius: var(--r-sm);
   color: var(--text-2);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   text-align: left;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .nav-item:hover {
@@ -175,13 +173,24 @@ function switchTheme(t: Theme) {
 }
 
 .nav-item.active {
-  background: var(--surface);
+  background: var(--accent-bg);
   color: var(--text);
-  box-shadow: var(--shadow);
+}
+
+/* 当前项：左侧 2px 强调色竖条 */
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
 }
 
 .nav-item.active :deep(svg) {
-  color: var(--blue);
+  color: var(--accent);
 }
 
 .nav-label {
@@ -190,6 +199,13 @@ function switchTheme(t: Theme) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.nav-type {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
 }
 
 .nav-empty {
@@ -203,11 +219,10 @@ function switchTheme(t: Theme) {
   align-items: center;
   gap: 9px;
   padding: 11px 13px;
-  border-radius: 14px;
+  border-radius: var(--r-sm);
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text-2);
   font-size: 12.5px;
-  font-weight: 600;
 }
 </style>

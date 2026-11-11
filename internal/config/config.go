@@ -121,6 +121,10 @@ func (f Feature) IsChat() bool { return f.Kind == "chat" }
 // 服务端按 Input.TargetLanguage.Options 对该字段做白名单校验后再拼进提示词。
 const TargetLangField = "target_lang"
 
+// BatchSizeField 批量翻译类子功能（字幕翻译）的批次大小表单字段名。
+// 服务端校验为 0-200 的整数；0 或未提交时回退 yml 的 workflow.batch-size。
+const BatchSizeField = "batch_size"
+
 // SelectParam 输入表单上的一个下拉选择项（如字幕翻译的「目标语言」）。
 // 声明后由 GET /api/features 下发，前端渲染 <select> 并以 TargetLangField 提交。
 type SelectParam struct {

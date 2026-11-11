@@ -63,9 +63,7 @@ const trendTotal = computed(() =>
   trendData.value.reduce((sum, d) => sum + d.value, 0),
 )
 
-const trendColor = computed(() =>
-  metric.value === 'calls' ? 'var(--blue)' : 'var(--purple)',
-)
+const trendColor = computed(() => 'var(--accent)')
 
 const successRateText = computed(() => {
   const s = stats.value
@@ -73,17 +71,7 @@ const successRateText = computed(() => {
   return `${(s.success_rate * 100).toFixed(1)}%`
 })
 
-const BAR_COLORS = ['var(--blue)', 'var(--purple)', 'var(--green)', 'var(--orange)']
-
-const modelBars = computed(() => {
-  const models = stats.value?.models ?? []
-  const max = Math.max(1, ...models.map((m) => m.calls))
-  return models.map((m, i) => ({
-    ...m,
-    pct: Math.max(4, (m.calls / max) * 100),
-    color: BAR_COLORS[i % BAR_COLORS.length],
-  }))
-})
+const modelRows = computed(() => stats.value?.models ?? [])
 
 const stepsHint = computed(() =>
   stats.value?.last_call_at ? `最近调用 ${stats.value.last_call_at}` : '暂无调用记录',
@@ -204,11 +192,9 @@ onMounted(checkAll)
       调用统计已关闭（config.yml 的 storage.enabled=false），暂无指标数据。
     </p>
 
-    <div class="grid-metrics">
+    <div class="grid-metrics card">
       <MetricCard
         label="总调用次数"
-        icon="bolt"
-        tone="blue"
         :value="thousand(stats?.total_calls ?? 0)"
         :delta="deltaOf(callsSeries)"
         :hint="`今日 ${thousand(stats?.today_calls ?? 0)} 次`"
@@ -216,8 +202,6 @@ onMounted(checkAll)
       />
       <MetricCard
         label="Token 消耗"
-        icon="layers"
-        tone="purple"
         :value="compact(stats?.total_tokens ?? 0)"
         :delta="deltaOf(tokensSeries)"
         hint="提示 + 补全"
@@ -225,16 +209,12 @@ onMounted(checkAll)
       />
       <MetricCard
         label="平均耗时"
-        icon="clock"
-        tone="orange"
         :value="duration(stats?.avg_latency_ms ?? 0)"
         :hint="`共 ${recent.length} 次采样`"
         :series="latencySeries"
       />
       <MetricCard
         label="调用成功率"
-        icon="check"
-        tone="green"
         :value="successRateText"
         :hint="`失败 ${thousand(
           daily.reduce((s, d) => s + d.failures, 0),
@@ -275,21 +255,29 @@ onMounted(checkAll)
           <p class="card-title">模型用量</p>
           <p class="card-sub">按调用次数排序</p>
         </header>
-        <div class="bars">
-          <div v-for="m in modelBars" :key="`${m.provider}|${m.model}`" class="bar-row">
-            <div class="bar-info">
-              <span class="bar-name">{{ m.model }}</span>
-              <span class="bar-provider">{{ m.provider }}</span>
-            </div>
-            <div class="bar-track">
-              <span class="bar-fill" :style="{ width: `${m.pct}%`, background: m.color }" />
-            </div>
-            <div class="bar-value">
-              <span class="bar-num">{{ thousand(m.calls) }}</span>
-              <span class="bar-meta">{{ compact(m.tokens) }} tokens · {{ duration(m.avg_latency_ms) }}</span>
-            </div>
-          </div>
-          <p v-if="!modelBars.length" class="blank">暂无模型调用数据</p>
+        <div class="table-wrap">
+          <table v-if="modelRows.length" class="table">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th class="num">调用</th>
+                <th class="num">Token</th>
+                <th class="num">平均耗时</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="m in modelRows" :key="`${m.provider}|${m.model}`">
+                <td>
+                  <span class="cell-model num">{{ m.model }}</span>
+                  <span class="cell-provider">{{ m.provider }}</span>
+                </td>
+                <td class="num">{{ thousand(m.calls) }}</td>
+                <td class="num">{{ compact(m.tokens) }}</td>
+                <td class="num">{{ duration(m.avg_latency_ms) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="blank">暂无模型调用数据</p>
         </div>
       </article>
 
@@ -310,11 +298,8 @@ onMounted(checkAll)
         </header>
         <ul class="providers">
           <li v-for="p in providers" :key="p.name" class="provider">
-            <span class="provider-icon" :class="statusOf(p.name).tone">
-              <AppIcon name="db" :size="15" />
-            </span>
             <div class="provider-main">
-              <span class="provider-name">
+              <span class="provider-name num">
                 {{ p.name }}
                 <span v-if="p.default" class="tag">默认</span>
               </span>
@@ -322,7 +307,7 @@ onMounted(checkAll)
             </div>
             <div class="provider-right">
               <span class="tag">{{ p.type }}</span>
-              <span class="state" :class="statusOf(p.name).tone" :title="statusOf(p.name).detail">
+              <span class="state num" :class="statusOf(p.name).tone" :title="statusOf(p.name).detail">
                 {{ statusOf(p.name).label }}
                 <em v-if="statusOf(p.name).latency">· {{ statusOf(p.name).latency }}ms</em>
               </span>
@@ -366,8 +351,8 @@ onMounted(checkAll)
               <td class="num">{{ thousand(row.prompt_tokens + row.completion_tokens) }}</td>
               <td class="num">{{ duration(row.latency_ms) }}</td>
               <td>
-                <span class="state" :class="row.ok ? 'ok' : 'fail'">
-                  {{ row.ok ? '成功' : '失败' }}
+                <span class="state num" :class="row.ok ? 'ok' : 'fail'">
+                  {{ row.ok ? 'ok' : 'failed' }}
                 </span>
               </td>
             </tr>
@@ -432,7 +417,15 @@ onMounted(checkAll)
 .grid-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+}
+
+/* 四张指标卡共用一张表的 1px 分隔线，而不是四张独立阴影卡 */
+.grid-metrics :deep(.metric) {
+  border-left: 1px solid var(--border);
+}
+
+.grid-metrics :deep(.metric:first-child) {
+  border-left: none;
 }
 
 .trend-card {
@@ -465,114 +458,25 @@ onMounted(checkAll)
   gap: 14px;
 }
 
-/* ---- 模型用量条 ---- */
-.bars {
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-  padding: 16px 20px 20px;
-}
-
-.bar-row {
-  display: grid;
-  grid-template-columns: 128px 1fr 116px;
-  align-items: center;
-  gap: 14px;
-}
-
-.bar-info {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.bar-name {
-  font-size: 13px;
-  font-weight: 650;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bar-provider {
-  color: var(--text-3);
-  font-size: 11.5px;
-}
-
-.bar-track {
-  height: 7px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  overflow: hidden;
-}
-
-.bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  transition: width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.bar-value {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-}
-
-.bar-num {
-  font-size: 13.5px;
-  font-weight: 700;
-}
-
-.bar-meta {
-  color: var(--text-3);
-  font-size: 11.5px;
-}
-
 /* ---- provider 列表 ---- */
 .providers {
   list-style: none;
   margin: 0;
-  padding: 14px 20px 20px;
+  padding: 6px 20px 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
 .provider {
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 11px 13px;
-  border-radius: var(--radius);
-  background: var(--surface-2);
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
 }
 
-.provider-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--blue);
-  flex: none;
-  transition: color 0.16s ease;
-}
-
-/* 端点连通状态配色（图标 / 状态药丸共用 tone） */
-.provider-icon.ok {
-  color: var(--green);
-}
-.provider-icon.warn {
-  color: var(--orange);
-}
-.provider-icon.off {
-  color: var(--red);
-}
-.provider-icon.idle {
-  color: var(--blue);
+.provider:first-child {
+  border-top: none;
 }
 
 .provider-right {
@@ -583,37 +487,26 @@ onMounted(checkAll)
 }
 
 .state {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--surface-2);
   color: var(--text-3);
-  font-size: 11.5px;
-  font-weight: 700;
+  font-size: 12px;
   white-space: nowrap;
 }
 
 .state em {
   font-style: normal;
-  font-weight: 600;
   opacity: 0.75;
 }
 
 .state.ok {
-  background: var(--green-soft);
-  color: var(--ok-strong);
+  color: var(--ok);
 }
 .state.warn {
-  background: var(--orange-soft);
-  color: var(--warn-strong);
+  color: var(--warn);
 }
 .state.off {
-  background: var(--red-soft);
-  color: var(--bad-strong);
+  color: var(--err);
 }
 .state.idle {
-  background: var(--surface-2);
   color: var(--text-3);
 }
 
@@ -707,22 +600,19 @@ onMounted(checkAll)
   font-size: 11.5px;
 }
 
-.state {
-  display: inline-flex;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 700;
+/* 最近调用的状态列：mono 小写文字 + 语义色 */
+.state.num {
+  font-size: 12px;
 }
 
-.state.ok {
-  color: var(--ok-strong);
-  background: var(--green-soft);
+.state.num.ok {
+  color: var(--ok);
+  background: none;
 }
 
-.state.fail {
-  color: var(--bad-strong);
-  background: var(--red-soft);
+.state.num.fail {
+  color: var(--err);
+  background: none;
 }
 
 .blank {

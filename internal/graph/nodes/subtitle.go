@@ -368,7 +368,14 @@ func splitSRTLines(s string) []string {
 	return out
 }
 
+// subtitleBatchSize 决定单批送模型的字幕条数：优先取表单参数 batch_size
+// （1-200；0 或非法值忽略），其次 yml 的 workflow.batch-size，最后默认值。
 func subtitleBatchSize(d Deps) int {
+	if raw := strings.TrimSpace(d.Params[config.BatchSizeField]); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 200 {
+			return n
+		}
+	}
 	if d.BatchSize > 0 {
 		return d.BatchSize
 	}

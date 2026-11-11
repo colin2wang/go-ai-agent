@@ -47,7 +47,7 @@ workflow:
   type: subtitle-translate    # 编排类型（对应 internal/graph 内置图）
   entry: parse
   max-retries: 0
-  batch-size: 20              # 每批发给模型的字幕条数（过大易超 max-tokens 导致截断）
+  batch-size: 50              # 每批发给模型的字幕条数（前端可按次覆盖 batch_size 表单字段，0-200）
   max-parallel: 2             # 批次并发度（1 = 串行）
   provider-max-requests: 2    # 单个 provider 的并发请求上限
   retry-max: 2                # 单次调用失败重试上限（仅限流/5xx/网络错误）
@@ -62,8 +62,8 @@ workflow:
 steps:
   translate:
     provider: lmstudio-local
-    model: qwen/qwen3.8-27b
-    temperature: 0.3
+    model: qwen/qwen3-4b-2507
+    temperature: 0.2
     max-tokens: 8192
     reasoning-enabled: false
     system-prompt: |

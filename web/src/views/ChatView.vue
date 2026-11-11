@@ -4,6 +4,7 @@ import AppIcon from '../components/AppIcon.vue'
 import { fetchModelCaps, fetchProviderModels, sendChat } from '../api'
 import { duration } from '../chart'
 import { renderMarkdown } from '../markdown'
+import { pushLog } from '../logstore'
 import type { FeatureInfo, ModelCaps, ModelInfo, ProviderInfo } from '../types'
 import type { ChatImage, ChatMessage } from '../types'
 
@@ -334,6 +335,7 @@ async function submit() {
   sending.value = true
   scrollToBottom()
   abort = new AbortController()
+  pushLog('info', `[chat] 发送消息：${usedSrc}（${stream ? '流式' : '非流式'}）`)
   const payloadMessages = [
     ...history,
     { role: 'user' as const, content: question, images: images.length ? images : undefined },
@@ -357,6 +359,7 @@ async function submit() {
           onDone: (done) => {
             reply.streaming = false
             reply.meta = `${duration(done.duration_ms)} · ↑${done.prompt_tokens} ↓${done.completion_tokens} tokens · ${usedSrc}`
+            pushLog('info', `[chat] 生成完成：${duration(done.duration_ms)} · ${done.prompt_tokens + done.completion_tokens} tokens · ${usedSrc}`)
           },
         },
         abort.signal,
@@ -392,6 +395,7 @@ async function submit() {
   } catch (e) {
     reply.streaming = false
     reply.error = e instanceof Error ? e.message : String(e)
+    pushLog('error', `[chat] 生成失败：${reply.error}`)
   } finally {
     reply.meta = reply.meta ?? ''
     sending.value = false
@@ -766,7 +770,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--blue);
+  color: var(--accent);
   font-size: 11px;
   font-weight: 600;
 }
@@ -807,15 +811,15 @@ onBeforeUnmount(() => {
 }
 
 .cap-chip.reasoning {
-  color: var(--purple);
-  background: var(--purple-soft);
-  border-color: var(--purple);
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-color: var(--accent);
 }
 
 .cap-chip.vision {
-  color: var(--blue);
-  background: var(--blue-soft);
-  border-color: var(--blue);
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-color: var(--accent);
 }
 
 .cap-chip.plain {
@@ -884,7 +888,7 @@ onBeforeUnmount(() => {
 }
 
 .switch input:checked + .track {
-  background: var(--green);
+  background: var(--accent);
 }
 
 .switch input:checked + .track::after {
@@ -935,7 +939,7 @@ onBeforeUnmount(() => {
 
 /* 拖拽图片悬停在卡片上时的高亮（outline 不占布局，不会引起滚动跳动） */
 .chat-card.dropping {
-  outline: 2px dashed var(--blue);
+  outline: 2px dashed var(--accent);
   outline-offset: -6px;
 }
 
@@ -1041,7 +1045,7 @@ onBeforeUnmount(() => {
 
 .bubble {
   padding: 10px 14px;
-  border-radius: 16px;
+  border-radius: var(--r-sm);
   background: var(--surface-2);
   border: 1px solid var(--border);
   white-space: pre-wrap;
@@ -1050,9 +1054,11 @@ onBeforeUnmount(() => {
   line-height: 1.75;
 }
 
-.msg.user .bubble {
-  background: var(--blue-soft);
-  border-color: transparent;
+/* AI 回复不用气泡：平铺排版，与正文一致 */
+.msg.assistant .bubble {
+  padding: 2px 0;
+  background: transparent;
+  border: none;
 }
 
 /* 气泡内的图片附件（缩略图点击无交互，仅展示） */
@@ -1145,7 +1151,7 @@ onBeforeUnmount(() => {
 }
 
 .bubble.md :deep(a) {
-  color: var(--blue);
+  color: var(--accent);
   text-decoration: underline;
 }
 
@@ -1236,28 +1242,28 @@ onBeforeUnmount(() => {
 
 .msg-meta {
   color: var(--text-3);
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 
 .reasoning {
   align-self: flex-start;
   max-width: 100%;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
   color: var(--text-2);
   font-size: 12px;
 }
 
 .reasoning summary {
-  padding: 6px 11px;
+  padding: 4px 0;
   cursor: pointer;
   user-select: none;
   font-weight: 600;
 }
 
 .reasoning-text {
-  padding: 8px 12px 11px;
+  padding: 4px 0 6px;
   max-height: 180px;
   overflow: auto;
   white-space: pre-wrap;
@@ -1301,7 +1307,7 @@ onBeforeUnmount(() => {
 
 .composer-row .input:focus {
   outline: none;
-  border-color: var(--blue);
+  border-color: var(--accent);
   background: var(--surface);
 }
 

@@ -1,113 +1,102 @@
 /* ============================================================================
- * 全局主题：浅色卡片式仪表盘
- * 配色参考：中性浅灰底 + 白卡片 + 绿/蓝/紫/橙四色作为指标强调色
+ * 全局主题：边框驱动的工作台风格（浅色默认）
+ * 暖灰中性色 + 单一强调色（深青绿）+ 语义色只表达状态 + mono 数字
  * ========================================================================== */
 
 :root {
-  --bg: #f4f5f7;
+  /* 中性色：暖灰，避免 slate 的蓝调（蓝灰 = AI 味） */
+  --bg: #faf9f7;
   --surface: #ffffff;
-  --surface-2: #f7f8fa;
-  --border: #ececf0;
-  --text: #1d1d1f;
-  --text-2: #86868b;
-  --text-3: #b3b3b9;
+  --surface-2: #f4f2ef;
+  --border: #e3e0da;
+  --border-strong: #c8c4bc;
+  --text: #1d1b18;
+  --text-2: #56524b;
+  --text-3: #8b857b;
 
-  --green: #30c85e;
-  --green-soft: #e8f8ee;
-  --blue: #0a84ff;
-  --blue-soft: #e9f2ff;
-  --purple: #af52de;
-  --purple-soft: #f5ecfc;
-  --orange: #ff9f0a;
-  --orange-soft: #fff4e3;
-  --red: #ff453a;
-  --red-soft: #ffecea;
+  /* 单一强调色：深青绿 */
+  --accent: #0e7a6c;
+  --accent-hover: #0b6357;
+  --accent-bg: rgba(14, 122, 108, 0.07);
 
-  --radius-lg: 22px;
-  --radius: 16px;
-  --radius-sm: 10px;
+  /* 语义色只用于状态，永不用于装饰 */
+  --ok: #2b7a3d;
+  --err: #c2352b;
+  --warn: #9a6700;
+  --running: #3556c8;
 
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 8px 24px rgba(16, 24, 40, 0.045);
-  --sidebar-w: 252px;
+  /* 形状分级：按钮/输入框 4px，卡片 6px，浮层 10px */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --shadow-pop: 0 4px 16px rgba(29, 27, 24, 0.1);
 
-  /* 语义别名：供组件引用，避免硬编码浅色值 */
+  /* 字体：Windows + Wails(WebView2) 系统栈，零网络依赖 */
+  --font-ui: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', Consolas, ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --sidebar-w: 216px;
+
+  /* ---- 兼容别名：组件逐步迁移后删除 ---- */
+  --radius-lg: var(--r-lg);
+  --radius: var(--r-md);
+  --radius-sm: var(--r-sm);
+  --shadow: var(--shadow-pop);
+  --green: var(--ok);
+  --green-soft: rgba(43, 122, 61, 0.1);
+  --blue: var(--accent);
+  --blue-soft: var(--accent-bg);
+  --purple: var(--accent);
+  --purple-soft: var(--accent-bg);
+  --orange: var(--warn);
+  --orange-soft: rgba(154, 103, 0, 0.1);
+  --red: var(--err);
+  --red-soft: rgba(194, 53, 43, 0.1);
+
   --on-accent: #fff;
-  --scrim: rgba(20, 20, 24, 0.72);
-  --code-bg: #1d1d1f;
-  --code-fg: #f5f5f7;
-  --grid-line: #e6e6ec;
-  --hairline: #fff;
-  --ok-strong: #1f9d4d;
-  --bad-strong: #d13b30;
-  --warn-strong: #a86700;
-  --warn-deep: #8a5600;
-  --track: #d9d9e0;
+  --scrim: rgba(29, 27, 24, 0.72);
+  --code-bg: #f4f2ef;
+  --code-fg: #1d1b18;
+  --grid-line: #e3e0da;
+  --hairline: var(--border);
+  --ok-strong: var(--ok);
+  --bad-strong: var(--err);
+  --warn-strong: var(--warn);
+  --warn-deep: var(--warn);
+  --track: #dcd8d1;
 }
 
 /* ==========================================================================
- * 终端主题：深色 CRT 风（等宽字体 + 虚线边框 + 霓虹强调色）
- * 配色参考外部 agent-harness-console 项目
+ * 终端主题：同构一套变量，两套主题共享组件样式
  * ========================================================================== */
 :root[data-theme='terminal'] {
-  --bg: #16161f;
-  --surface: #101018;
-  --surface-2: #1b1b26;
-  --border: #2c2c40;
-  --text: #d8dbe6;
-  --text-2: #8a8fa8;
-  --text-3: #5a5e78;
+  --bg: #121412;
+  --surface: #191c19;
+  --surface-2: #20241f;
+  --border: #2a2e2a;
+  --border-strong: #3c423c;
+  --text: #d6d9d4;
+  --text-2: #9aa29a;
+  --text-3: #6b736b;
 
-  --green: #58e6a0;
-  --green-soft: rgba(88, 230, 160, 0.12);
-  --blue: #7f9cff;
-  --blue-soft: rgba(127, 156, 255, 0.12);
-  --purple: #c99cff;
-  --purple-soft: rgba(201, 156, 255, 0.12);
-  --orange: #ffd479;
-  --orange-soft: rgba(255, 212, 121, 0.12);
-  --red: #ff6b81;
-  --red-soft: rgba(255, 107, 129, 0.12);
+  --accent: #5bb89b;
+  --accent-hover: #6fcaac;
+  --accent-bg: rgba(91, 184, 155, 0.12);
 
-  --radius-lg: 10px;
-  --radius: 8px;
-  --radius-sm: 5px;
+  --ok: #6fc27f;
+  --err: #e0705f;
+  --warn: #d3a94c;
+  --running: #7f9cff;
 
-  --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
-  --sidebar-w: 252px;
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.5);
 
-  --on-accent: #16161f;
+  --on-accent: #121412;
   --scrim: rgba(0, 0, 0, 0.6);
-  --code-bg: #0b0b12;
-  --code-fg: #d8dbe6;
-  --grid-line: #232334;
-  --hairline: var(--surface);
-  --ok-strong: #58e6a0;
-  --bad-strong: #ff6b81;
-  --warn-strong: #ffd479;
-  --warn-deep: #ffd479;
-  --track: #2c2c40;
-}
-
-:root[data-theme='terminal'] body {
-  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo,
-    Consolas, 'Liberation Mono', monospace;
-  font-size: 13px;
-}
-
-/* CRT 扫描线 + 暗角，低调到几乎不可见 */
-:root[data-theme='terminal'] body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background:
-    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 3px),
-    radial-gradient(ellipse at center, transparent 62%, rgba(0, 0, 0, 0.38) 100%);
-  z-index: 9999;
-}
-
-:root[data-theme='terminal'] ::selection {
-  background: rgba(111, 227, 255, 0.28);
+  --code-bg: #101310;
+  --code-fg: #d6d9d4;
+  --grid-line: #222622;
+  --hairline: var(--border);
+  --track: #2a2e2a;
 }
 
 * {
@@ -124,8 +113,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
-    'HarmonyOS Sans SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -145,7 +133,7 @@ h2,
 h3,
 h4 {
   margin: 0;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
@@ -153,9 +141,30 @@ p {
   margin: 0;
 }
 
-pre {
+pre,
+code {
   margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
+}
+
+/* 数字全部 mono + 表格对齐，这是"工程感"的最大来源 */
+.num,
+td.num,
+.metric-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* transition ≤150ms，无弹性曲线 */
+* {
+  transition-duration: 120ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 ::-webkit-scrollbar {
@@ -163,25 +172,28 @@ pre {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--text-3);
+  background: var(--border-strong);
   border-radius: 999px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-2);
+  background: var(--text-3);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* ---- 卡片 ---- */
+/* ---- 卡片：边框驱动，无阴影 ---- */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow);
+  border-radius: var(--r-md);
+}
+
+.card:hover {
+  border-color: var(--border-strong);
 }
 
 .card-head {
@@ -189,12 +201,12 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 18px 20px 0;
+  padding: 16px 20px 0;
 }
 
 .card-title {
-  font-size: 14.5px;
-  font-weight: 650;
+  font-size: 13.5px;
+  font-weight: 600;
 }
 
 .card-sub {
@@ -202,33 +214,34 @@ pre {
   font-size: 12.5px;
 }
 
-/* ---- 药丸分段控件 ---- */
+/* ---- 分段控件（方形，工具风） ---- */
 .segmented {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
+  padding: 2px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--r-sm);
 }
 
 .segmented button {
-  padding: 6px 14px;
-  border-radius: 999px;
+  padding: 5px 12px;
+  border-radius: 3px;
   color: var(--text-2);
   font-size: 12.5px;
   font-weight: 600;
-  transition: background 0.16s ease, color 0.16s ease;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .segmented button:hover {
   color: var(--text);
+  background: var(--surface-2);
 }
 
 .segmented button.active {
-  background: var(--text);
-  color: var(--bg);
+  background: var(--accent-bg);
+  color: var(--accent);
 }
 
 /* ---- 按钮 ---- */
@@ -237,25 +250,21 @@ pre {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 18px;
-  border-radius: 12px;
-  background: var(--text);
-  color: var(--bg);
-  font-size: 13.5px;
+  padding: 8px 16px;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 13px;
   font-weight: 600;
-  transition: opacity 0.14s ease, transform 0.12s ease;
+  transition: background 0.12s ease;
 }
 
 .btn:hover:not(:disabled) {
-  opacity: 0.87;
-}
-
-.btn:active:not(:disabled) {
-  transform: scale(0.985);
+  background: var(--accent-hover);
 }
 
 .btn:disabled {
-  opacity: 0.38;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
@@ -263,7 +272,10 @@ pre {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow);
+}
+
+.btn.ghost:hover:not(:disabled) {
+  background: var(--surface-2);
 }
 
 /* ---- 小标签 ---- */
@@ -271,8 +283,8 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 9px;
-  border-radius: 999px;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text-2);
@@ -281,18 +293,16 @@ pre {
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex: none;
 }
 .dot.on {
-  background: var(--green);
-  box-shadow: 0 0 0 3px var(--green-soft);
+  background: var(--ok);
 }
 .dot.off {
-  background: var(--red);
-  box-shadow: 0 0 0 3px var(--red-soft);
+  background: var(--err);
 }
 .dot.wait {
   background: var(--text-3);
@@ -300,28 +310,26 @@ pre {
 
 /* ==========================================================================
  * 终端主题 — 结构改造：整页呈现为终端控制台
- * （窗口框 / 虚线面板 / 终端按钮 / 表格 / 侧边栏，仅 terminal 主题生效）
  * ========================================================================== */
 
-/* ---- 整页终端窗口 ---- */
 :root[data-theme='terminal'] body {
+  font-size: 13px;
   padding: 14px 16px 28px;
 }
 
 :root[data-theme='terminal'] .term-window {
   max-width: 1440px;
   margin: 0 auto;
+  height: calc(100vh - 42px);
+  min-height: 0;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
   background: var(--bg);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
   overflow: clip;
-  min-height: calc(100vh - 42px);
   display: flex;
   flex-direction: column;
 }
 
-/* 浅色主题下这些结构节点保持透明，不影响原布局 */
 .term-titlebar {
   display: none;
 }
@@ -334,6 +342,7 @@ pre {
   background: var(--surface-2);
   border-bottom: 1px solid var(--border);
   color: var(--text-2);
+  font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.04em;
 }
@@ -344,14 +353,14 @@ pre {
 }
 
 :root[data-theme='terminal'] .term-lights span {
-  width: 11px;
-  height: 11px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
 }
 
-:root[data-theme='terminal'] .term-lights .l-r { background: #ff5f57; }
-:root[data-theme='terminal'] .term-lights .l-y { background: #febc2e; }
-:root[data-theme='terminal'] .term-lights .l-g { background: #28c840; }
+:root[data-theme='terminal'] .term-lights .l-r { background: #b05248; }
+:root[data-theme='terminal'] .term-lights .l-y { background: #b08d3c; }
+:root[data-theme='terminal'] .term-lights .l-g { background: #4f9a5c; }
 
 :root[data-theme='terminal'] .term-title {
   flex: 1;
@@ -363,20 +372,16 @@ pre {
   width: 45px;
 }
 
+/* terminal 主题 body 有上下内边距（14+28），视口内高度都要减去 42px；
+   壳层固定一屏、内容区内部滚动，底部日志面板常驻（App.vue 布局） */
 :root[data-theme='terminal'] .shell {
   flex: 1;
+  min-height: 0;
 }
 
-/* ---- 卡片 → 虚线面板 ---- */
+/* ---- 终端主题组件微调 ---- */
 :root[data-theme='terminal'] .card {
-  border-style: dashed;
-  border-radius: 6px;
-  box-shadow: none;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 40%);
-}
-
-:root[data-theme='terminal'] .card-head {
-  padding-top: 14px;
+  border-radius: 4px;
 }
 
 :root[data-theme='terminal'] .card-title {
@@ -389,58 +394,16 @@ pre {
   letter-spacing: 0.14em;
 }
 
-/* ---- 按钮 → 终端按钮 ---- */
 :root[data-theme='terminal'] .btn {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 4px;
   font-size: 12px;
   letter-spacing: 0.05em;
-  box-shadow: none;
 }
 
-:root[data-theme='terminal'] .btn:hover:not(:disabled) {
-  border-color: var(--blue);
-  color: var(--blue);
-  opacity: 1;
-}
-
-:root[data-theme='terminal'] .btn.ghost {
-  background: var(--surface-2);
-  box-shadow: none;
-}
-
-:root[data-theme='terminal'] .btn.ghost:hover:not(:disabled) {
-  border-color: var(--cyan, var(--blue));
-}
-
-/* ---- 分段控件 → 终端 chip 组 ---- */
-:root[data-theme='terminal'] .segmented {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px;
-}
-
-:root[data-theme='terminal'] .segmented button {
-  border-radius: 3px;
-  letter-spacing: 0.05em;
-}
-
-:root[data-theme='terminal'] .segmented button.active {
-  background: var(--purple-soft);
-  color: var(--purple);
-}
-
-/* ---- 标签 → 方角 chip ---- */
 :root[data-theme='terminal'] .tag {
-  border-radius: 3px;
   letter-spacing: 0.06em;
   font-size: 10.5px;
 }
 
-/* ---- 表格 ---- */
 :root[data-theme='terminal'] table {
   font-size: 12px;
 }
@@ -452,7 +415,6 @@ pre {
   color: var(--text-3);
 }
 
-/* ---- 侧边栏 → 终端导航面板 ---- */
 :root[data-theme='terminal'] .sidebar {
   background: transparent;
   backdrop-filter: none;
@@ -469,13 +431,12 @@ pre {
 }
 
 :root[data-theme='terminal'] .nav-item.active {
-  background: var(--purple-soft);
-  color: var(--purple);
-  box-shadow: none;
+  background: var(--accent-bg);
+  color: var(--accent);
 }
 
 :root[data-theme='terminal'] .nav-item.active :deep(svg) {
-  color: var(--purple);
+  color: var(--accent);
 }
 
 :root[data-theme='terminal'] .status {
@@ -485,24 +446,22 @@ pre {
   letter-spacing: 0.04em;
 }
 
-/* ---- 输入框 / 文本域 ---- */
 :root[data-theme='terminal'] input,
 :root[data-theme='terminal'] textarea,
 :root[data-theme='terminal'] select {
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
 }
 
 :root[data-theme='terminal'] input:focus,
 :root[data-theme='terminal'] textarea:focus,
 :root[data-theme='terminal'] select:focus {
   outline: none;
-  border-color: var(--blue);
+  border-color: var(--accent);
 }
 
-/* ---- 滚动条 → 终端细滚动条 ---- */
 :root[data-theme='terminal'] ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

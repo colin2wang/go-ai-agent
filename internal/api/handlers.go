@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -11,7 +12,14 @@ import (
 
 // validateFormParams 按子功能声明校验额外参数：目标语言未提交时用
 // yml 的 default 补齐，且必须是 options 白名单内的值（启动期已校验 default 合法）。
+// batch_size 为可选整数（0-200），0 表示交由 yml 的 workflow.batch-size 决定。
 func validateFormParams(params map[string]string, in config.Input) error {
+	if raw := params[config.BatchSizeField]; raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 || n > 200 {
+			return fmt.Errorf("batch_size %q 不合法：应为 0-200 的整数", raw)
+		}
+	}
 	sel := in.TargetLanguage
 	if sel == nil {
 		return nil
